@@ -25,9 +25,9 @@ BRL-CAD is a powerful open-source Constructive Solid Geometry (CSG) modeling sys
 
 The system is built on three layers:
 
-1. **Tcl Socket Listener** -- runs inside BRL-CAD's MGED and accepts commands over a TCP socket.
-2. **MCP Tool Server** -- a Python FastMCP server that exposes typed, validated tool functions (sphere creation, boolean operations, etc.) to any MCP-compatible client.
-3. **LangGraph Agent Client** -- a ReAct agent that reasons about user requests, selects the appropriate tools, and orchestrates multi-step modeling operations.
+1. **Tcl Socket Listener** -- runs inside BRL-CAD's MGED and accepts commands over a persistent TCP socket, returning delimited responses with `SUCCESS:`/`ERROR:` prefixes.
+2. **MCP Tool Server** -- a Python FastMCP server that exposes typed, validated tool functions (sphere creation, boolean operations, dynamic command discovery, and generic command execution) to any MCP-compatible client.
+3. **LangGraph Agent Client** -- a ReAct agent that reasons about user requests, selects the appropriate tools, and orchestrates multi-step modeling operations with real-time tool-call visibility.
 
 ---
 
@@ -35,11 +35,11 @@ The system is built on three layers:
 
 The system is composed of three layers that communicate in a chain:
 
-- **Client** (`client/agent.py`) — A LangGraph ReAct agent that takes natural-language input from the user, reasons about the request, and decides which MCP tool(s) to call. It spawns the MCP server as a subprocess and talks to it over **stdio**.
+- **Client** (`client/agent.py`) — A LangGraph ReAct agent that takes natural-language input from the user, reasons about the request, and decides which MCP tool(s) to call. It maintains a **persistent MCP session** with the server subprocess over **stdio**, so all tool calls share the same server process and TCP connection to MGED.
 
-- **Server** (`server/app.py` + `server/tools/*`) — A FastMCP tool server that exposes typed, validated geometry operations (sphere, cylinder, box, booleans, etc.). When a tool is invoked, it builds the corresponding MGED command and sends it to BRL-CAD over a **TCP** connection (port 5555) via the transport layer (`transport/socket_bridge.py`).
+- **Server** (`server/app.py` + `server/tools/*`) — A FastMCP tool server that exposes 8 typed, validated tools: 4 dedicated geometry tools (sphere, cylinder, box, booleans) and 4 meta-tools for dynamic command discovery and execution. When a tool is invoked, it builds the corresponding MGED command and sends it to BRL-CAD over a **persistent TCP** connection (port 5555) via the transport layer (`transport/socket_bridge.py`). All responses are parsed using `SUCCESS:`/`ERROR:` prefixes from the listener.
 
-- **Bridge** (`scripts/listener.tcl`) — A lightweight Tcl script sourced inside BRL-CAD's MGED session. It listens on a TCP socket, evaluates incoming MGED commands, and returns the result.
+- **Bridge** (`scripts/listener.tcl`) — A lightweight Tcl script sourced inside BRL-CAD's MGED session. It listens on a TCP socket, evaluates incoming commands in the global MGED scope using `uplevel #0`, wraps results with `SUCCESS:`/`ERROR:` prefixes, and terminates each response with a `<<END_OF_RESPONSE>>` delimiter so the Python client can reliably read multi-line output.
 
 **Request lifecycle:** User prompt → Agent selects tool → MCP server builds MGED command → TCP socket → Tcl listener evaluates in MGED → result flows back through the same chain.
 
@@ -99,7 +99,7 @@ All configuration is managed through a `.env` file in the project root. A templa
 | `OPENAI_TEMPERATURE`  | Sampling temperature (0 = deterministic)     | `0`           |
 | `BRLCAD_HOST`         | Hostname where the Tcl listener is running   | `127.0.0.1`   |
 | `BRLCAD_PORT`         | TCP port for the Tcl socket bridge           | `5555`        |
-| `BRLCAD_TIMEOUT`      | Socket timeout in seconds                    | `2.0`         |
+| `BRLCAD_TIMEOUT`      | Socket timeout in seconds                    | `5.0`         |
 | `BRLCAD_BUFFER_SIZE`  | TCP receive buffer size in bytes             | `4096`        |
 | `MCP_TRANSPORT`       | MCP transport type                           | `stdio`       |
 
@@ -151,7 +151,7 @@ You should see:
 
 ```
 Starting local MCP Client...
-Successfully loaded 4 tool(s) from BRL-CAD!
+Successfully loaded 8 tool(s) from BRL-CAD!
 
 =================================================
  BRL-CAD Terminal Agent Active. Type 'exit' to quit.
@@ -174,9 +174,13 @@ Type `exit` or `quit` to terminate the session.
 
 ## Available Tools
 
-The MCP server currently exposes the following tools:
+The MCP server currently exposes **8 tools** organised into two groups:
 
-### `create_sphere`
+### Dedicated Geometry Tools
+
+These handle draw/autoview automatically and have strict parameter validation.
+
+#### `create_sphere`
 
 Creates a solid sphere primitive in BRL-CAD.
 
@@ -188,7 +192,7 @@ Creates a solid sphere primitive in BRL-CAD.
 | `z`       | float   | Z coordinate of the center          |
 | `radius`  | float   | Radius of the sphere                |
 
-### `create_cylinder`
+#### `create_cylinder`
 
 Creates a right circular cylinder (RCC) in BRL-CAD.
 
@@ -203,7 +207,7 @@ Creates a right circular cylinder (RCC) in BRL-CAD.
 | `height_z`  | float  | Z component of the height vector       |
 | `radius`    | float  | Radius of the cylinder                 |
 
-### `create_box`
+#### `create_box`
 
 Creates an axis-aligned box (RPP) in BRL-CAD.
 
@@ -217,16 +221,36 @@ Creates an axis-aligned box (RPP) in BRL-CAD.
 | `y_max`   | float  | Maximum Y coordinate       |
 | `z_max`   | float  | Maximum Z coordinate       |
 
-### `boolean_combination`
+#### `boolean_combination`
 
 Performs a CSG boolean operation to combine two existing objects.
 
 | Parameter       | Type   | Description                                                        |
 |-----------------|--------|--------------------------------------------------------------------|
-| `output_name`   | string | Name of the resulting combination (e.g., `result.c`)               |
+| `output_name`   | string | Name of the resulting region (e.g., `result.r`)                    |
 | `base_object`   | string | The primary object                                                 |
 | `operator`      | string | Boolean operator: `u` (union), `-` (subtract), `+` (intersect)    |
 | `target_object` | string | The secondary object                                               |
+
+### Meta-Tools (Dynamic Command Discovery & Execution)
+
+These tools allow the agent to discover, learn, and execute **any** MGED command — not just the ones with dedicated tool wrappers.
+
+#### `list_commands`
+
+Browse all available MGED commands with one-liner descriptions, optionally filtered by category (e.g., `creation`, `editing`, `display`).
+
+#### `get_command_help`
+
+Fetch the full help / man-page text for a specific MGED command to learn its exact argument syntax.
+
+#### `execute_command`
+
+Execute an arbitrary MGED command string. Supports `auto_draw` and `object_name` parameters for automatic view refresh after geometry changes.
+
+#### `analyze_command_error`
+
+Diagnose a failed MGED command: fetches help text, checks object existence, and executes a corrected command. Supports up to 5 retry attempts to prevent infinite loops.
 
 ---
 
@@ -247,6 +271,7 @@ To add a new tool:
 from pydantic import Field
 
 from brlcad_mcp.server.app import mcp
+from brlcad_mcp.server.tools.helpers import check_mged_result, parse_response
 from brlcad_mcp.transport import send_command
 
 @mcp.tool()
@@ -264,9 +289,12 @@ def create_cone(
     """Creates a truncated general cone (TGC) in BRL-CAD."""
     cmd = f"in {name} tgc {base_x} {base_y} {base_z} {height_x} {height_y} {height_z} {base_radius} {top_radius}"
     result = send_command(cmd)
+    error = check_mged_result(result, command=cmd)
+    if error:
+        return error
     send_command(f"draw {name}")
     send_command("autoview")
-    return f"Created cone '{name}'. Output: {result}"
+    return f"Created cone '{name}'. Output: {parse_response(result)}"
 ```
 
 If you create a new tool module (e.g., `transforms.py`), import it in `src/brlcad_mcp/server/tools/__init__.py` to ensure it gets registered.
@@ -291,11 +319,15 @@ brlcad-mcp/
 │       │   ├── app.py               # FastMCP application instance
 │       │   └── tools/
 │       │       ├── __init__.py      # Auto-imports tool modules
-│       │       ├── primitives.py    # Sphere, cylinder, box, …
-│       │       └── boolean.py       # CSG boolean operations
+│       │       ├── catalog.py       # MGED command catalog (categories + descriptions)
+│       │       ├── helpers.py       # Shared error detection + response parsing
+│       │       ├── primitives.py    # Sphere, cylinder, box creation tools
+│       │       ├── boolean.py       # CSG boolean operations
+│       │       ├── discovery.py     # list_commands + get_command_help tools
+│       │       └── execution.py     # execute_command + analyze_command_error tools
 │       └── transport/
 │           ├── __init__.py
-│           └── socket_bridge.py     # TCP socket comms to BRL-CAD
+│           └── socket_bridge.py     # Persistent TCP connection to BRL-CAD
 ├── scripts/
 │   └── listener.tcl                 # Tcl socket bridge for BRL-CAD MGED
 ├── tests/
