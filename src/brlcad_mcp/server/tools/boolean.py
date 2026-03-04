@@ -3,6 +3,7 @@
 from pydantic import Field
 
 from brlcad_mcp.server.app import mcp
+from brlcad_mcp.server.tools.helpers import check_mged_result, parse_response
 from brlcad_mcp.transport import send_command
 
 _VALID_OPERATORS = {"u", "-", "+"}
@@ -39,16 +40,14 @@ def boolean_combination(
         return f"Error: operator must be one of {_VALID_OPERATORS}, got '{operator}'."
 
     if output_name == base_object:
-        # Extending an existing region — just append the boolean operation.
-        # e.g.  r result.r - box.s
         cmd = f"r {output_name} {operator} {target_object}"
     else:
-        # Creating a brand-new region from two objects.
-        # The first member is unioned in to establish the base.
-        # e.g.  r result.r u sphere.s - cylinder.s
         cmd = f"r {output_name} u {base_object} {operator} {target_object}"
 
     result = send_command(cmd)
+    error = check_mged_result(result, command=cmd)
+    if error:
+        return error
 
     # Hide the individual pieces and show only the region
     if output_name != base_object:
@@ -60,5 +59,5 @@ def boolean_combination(
 
     return (
         f"CSG result: {output_name} = {base_object} {operator} {target_object}. "
-        f"Output: {result}"
+        f"Output: {parse_response(result)}"
     )

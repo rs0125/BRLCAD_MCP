@@ -3,6 +3,7 @@
 from pydantic import Field
 
 from brlcad_mcp.server.app import mcp
+from brlcad_mcp.server.tools.helpers import check_mged_result, parse_response
 from brlcad_mcp.transport import send_command
 
 
@@ -17,9 +18,12 @@ def create_sphere(
     """Creates a perfect mathematical sphere in BRL-CAD."""
     cmd = f"in {name} sph {x} {y} {z} {radius}"
     result = send_command(cmd)
+    error = check_mged_result(result, command=cmd)
+    if error:
+        return error
     send_command(f"draw {name}")
     send_command("autoview")
-    return f"Created sphere '{name}' at ({x}, {y}, {z}) with radius {radius}. Output: {result}"
+    return f"Created sphere '{name}' at ({x}, {y}, {z}) with radius {radius}. Output: {parse_response(result)}"
 
 
 @mcp.tool()
@@ -36,9 +40,12 @@ def create_cylinder(
     """Creates a right circular cylinder (RCC) in BRL-CAD."""
     cmd = f"in {name} rcc {base_x} {base_y} {base_z} {height_x} {height_y} {height_z} {radius}"
     result = send_command(cmd)
+    error = check_mged_result(result, command=cmd)
+    if error:
+        return error
     send_command(f"draw {name}")
     send_command("autoview")
-    return f"Created cylinder '{name}'. Output: {result}"
+    return f"Created cylinder '{name}'. Output: {parse_response(result)}"
 
 
 @mcp.tool()
@@ -54,6 +61,9 @@ def create_box(
     """Creates an axis-aligned rectangular parallelepiped (box) in BRL-CAD."""
     cmd = f"in {name} rpp {x_min} {x_max} {y_min} {y_max} {z_min} {z_max}"
     result = send_command(cmd)
+    error = check_mged_result(result, command=cmd)
+    if error:
+        return error
     send_command(f"draw {name}")
     send_command("autoview")
-    return f"Created box '{name}' from ({x_min}, {y_min}, {z_min}) to ({x_max}, {y_max}, {z_max}). Output: {result}"
+    return f"Created box '{name}' from ({x_min}, {y_min}, {z_min}) to ({x_max}, {y_max}, {z_max}). Output: {parse_response(result)}"
