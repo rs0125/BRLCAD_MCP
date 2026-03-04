@@ -22,7 +22,7 @@ class BRLCADConfig:
     host: str = field(default_factory=lambda: os.getenv("BRLCAD_HOST", "127.0.0.1"))
     port: int = field(default_factory=lambda: int(os.getenv("BRLCAD_PORT", "5555")))
     timeout: float = field(
-        default_factory=lambda: float(os.getenv("BRLCAD_TIMEOUT", "2.0"))
+        default_factory=lambda: float(os.getenv("BRLCAD_TIMEOUT", "5.0"))
     )
     buffer_size: int = field(
         default_factory=lambda: int(os.getenv("BRLCAD_BUFFER_SIZE", "4096"))
