@@ -23,7 +23,10 @@ def create_sphere(
         return error
     send_command(f"draw {name}")
     send_command("autoview")
-    return f"Created sphere '{name}' at ({x}, {y}, {z}) with radius {radius}. Output: {parse_response(result)}"
+    return (
+        f"Created sphere '{name}' at ({x}, {y}, {z}) with radius {radius}. "
+        f"Output: {parse_response(result)}"
+    )
 
 
 @mcp.tool()
@@ -66,4 +69,7 @@ def create_box(
         return error
     send_command(f"draw {name}")
     send_command("autoview")
-    return f"Created box '{name}' from ({x_min}, {y_min}, {z_min}) to ({x_max}, {y_max}, {z_max}). Output: {parse_response(result)}"
+    return (
+        f"Created box '{name}' from ({x_min}, {y_min}, {z_min}) "
+        f"to ({x_max}, {y_max}, {z_max}). Output: {parse_response(result)}"
+    )

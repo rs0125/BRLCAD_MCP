@@ -9,7 +9,6 @@ Tools
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from pydantic import Field
 
@@ -47,7 +46,7 @@ def execute_command(
             "or modifies visible geometry."
         ),
     ),
-    object_name: Optional[str] = Field(
+    object_name: str | None = Field(
         default=None,
         description=(
             "Name of the object to draw after execution (only used when "
@@ -60,9 +59,9 @@ def execute_command(
     **Workflow:** call ``list_commands`` to find a relevant command, then
     ``get_command_help`` to learn its syntax, then this tool to run it.
 
-    The command is sent directly to MGED's Tcl listener over the socket
-    bridge.  A small set of destructive commands (quit, exit) are blocked
-    for safety.
+    The command is sent directly to BRL-CAD's libmcpcad listener over the
+    socket bridge.  A small set of destructive commands (quit, exit) are
+    blocked for safety.
 
     If MGED returns an error, the response will be clearly tagged with
     ``[MGED_ERROR]`` so you can pass it to ``analyze_command_error`` for
@@ -80,7 +79,7 @@ def execute_command(
     except (ConnectionError, TimeoutError) as exc:
         return f"Error: {exc}"
 
-    # --- error detection (uses SUCCESS:/ERROR: prefix from Tcl listener) ---
+    # --- error detection (SUCCESS:/ERROR: prefix from the transport layer) ---
     error = check_mged_result(result, command=command)
     if error:
         return error
@@ -143,7 +142,7 @@ def analyze_command_error(
             "corrected command succeeds."
         ),
     ),
-    object_name: Optional[str] = Field(
+    object_name: str | None = Field(
         default=None,
         description=(
             "Name of the object to draw after execution (only used when "

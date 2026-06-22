@@ -8,8 +8,6 @@ Tools
 
 from __future__ import annotations
 
-from typing import Optional
-
 from pydantic import Field
 
 from brlcad_mcp.server.app import mcp
@@ -20,14 +18,13 @@ from brlcad_mcp.server.tools.catalog import (
 )
 from brlcad_mcp.transport import send_command
 
-
 # ---------------------------------------------------------------------------
 # Tool — list_commands
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
 def list_commands(
-    category: Optional[str] = Field(
+    category: str | None = Field(
         default=None,
         description=(
             "Optional category filter. One of: "

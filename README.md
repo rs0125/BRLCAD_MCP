@@ -25,7 +25,7 @@ BRL-CAD is a powerful open-source Constructive Solid Geometry (CSG) modeling sys
 
 The system is built on three layers:
 
-1. **Tcl Socket Listener** -- runs inside BRL-CAD's MGED and accepts commands over a persistent TCP socket, returning delimited responses with `SUCCESS:`/`ERROR:` prefixes.
+1. **libmcpcad Listener** -- the native BRL-CAD command listener (the `mcp_listen` command in MGED), which accepts commands over a length-prefixed local socket and executes them through the C `ged_exec()` pipeline, returning `OK` / `ERR <code>` framed responses. (See the [`libmcpcad` branch](https://github.com/rs0125/brlcad/tree/libmcpcad).)
 2. **MCP Tool Server** -- a Python FastMCP server that exposes typed, validated tool functions (sphere creation, boolean operations, dynamic command discovery, and generic command execution) to any MCP-compatible client.
 3. **LangGraph Agent Client** -- a ReAct agent that reasons about user requests, selects the appropriate tools, and orchestrates multi-step modeling operations with real-time tool-call visibility.
 
@@ -37,20 +37,21 @@ The system is composed of three layers that communicate in a chain:
 
 - **Client** (`client/agent.py`) — A LangGraph ReAct agent that takes natural-language input from the user, reasons about the request, and decides which MCP tool(s) to call. It maintains a **persistent MCP session** with the server subprocess over **stdio**, so all tool calls share the same server process and TCP connection to MGED.
 
-- **Server** (`server/app.py` + `server/tools/*`) — A FastMCP tool server that exposes 8 typed, validated tools: 4 dedicated geometry tools (sphere, cylinder, box, booleans) and 4 meta-tools for dynamic command discovery and execution. When a tool is invoked, it builds the corresponding MGED command and sends it to BRL-CAD over a **persistent TCP** connection (port 5555) via the transport layer (`transport/socket_bridge.py`). All responses are parsed using `SUCCESS:`/`ERROR:` prefixes from the listener.
+- **Server** (`server/app.py` + `server/tools/*`) — A FastMCP tool server that exposes 8 typed, validated tools: 4 dedicated geometry tools (sphere, cylinder, box, booleans) and 4 meta-tools for dynamic command discovery and execution. When a tool is invoked, it builds the corresponding MGED command and sends it to BRL-CAD over a **persistent** connection via the transport layer (`transport/socket_bridge.py`). Responses are keyed off `SUCCESS:`/`ERROR:` prefixes that the transport derives from the listener's framed status.
 
-- **Bridge** (`scripts/listener.tcl`) — A lightweight Tcl script sourced inside BRL-CAD's MGED session. It listens on a TCP socket, evaluates incoming commands in the global MGED scope using `uplevel #0`, wraps results with `SUCCESS:`/`ERROR:` prefixes, and terminates each response with a `<<END_OF_RESPONSE>>` delimiter so the Python client can reliably read multi-line output.
+- **Transport** (`transport/socket_bridge.py`) — Speaks the libmcpcad length-prefixed frame protocol (`MC` + u32 big-endian length + payload) in both directions, keeping a single long-lived connection so MGED state persists across calls. It translates the listener's `OK` / `ERR <code>` status into the `SUCCESS:` / `ERROR:` prefix the tools expect. The command text on the wire is plain MGED syntax — only the framing is structured.
 
-**Request lifecycle:** User prompt → Agent selects tool → MCP server builds MGED command → TCP socket → Tcl listener evaluates in MGED → result flows back through the same chain.
+**Request lifecycle:** User prompt → Agent selects tool → MCP server builds MGED command → framed socket → libmcpcad listener runs it via `ged_exec()` → result flows back through the same chain.
+
+> The pre-libmcpcad Tcl `uplevel` listener is preserved under [`legacy/`](legacy/) for historical reference and older MGED builds.
 
 ---
 
 ## Prerequisites
 
 - **Python 3.10+**
-- **BRL-CAD** (with MGED) installed and accessible on your system
+- **BRL-CAD** with the `libmcpcad` listener (the `mcp_listen` MGED command — see the [`libmcpcad` branch](https://github.com/rs0125/brlcad/tree/libmcpcad))
 - **OpenAI API key** with access to the GPT-4o model (or another supported model)
-- **Tcl** (bundled with BRL-CAD's MGED)
 
 ---
 
@@ -97,10 +98,10 @@ All configuration is managed through a `.env` file in the project root. A templa
 | `OPENAI_API_KEY`      | Your OpenAI API key (required)               | --            |
 | `OPENAI_MODEL`        | The OpenAI model to use                      | `gpt-4o`      |
 | `OPENAI_TEMPERATURE`  | Sampling temperature (0 = deterministic)     | `0`           |
-| `BRLCAD_HOST`         | Hostname where the Tcl listener is running   | `127.0.0.1`   |
-| `BRLCAD_PORT`         | TCP port for the Tcl socket bridge           | `5555`        |
+| `BRLCAD_HOST`         | Host where the libmcpcad listener is running | `127.0.0.1`   |
+| `BRLCAD_PORT`         | Port the listener (`mcp_listen`) is bound to | `5555`        |
 | `BRLCAD_TIMEOUT`      | Socket timeout in seconds                    | `5.0`         |
-| `BRLCAD_BUFFER_SIZE`  | TCP receive buffer size in bytes             | `4096`        |
+| `BRLCAD_BUFFER_SIZE`  | Receive buffer size in bytes                 | `4096`        |
 | `MCP_TRANSPORT`       | MCP transport type                           | `stdio`       |
 
 **Important:** Never commit your `.env` file. It is already included in `.gitignore`.
@@ -109,9 +110,10 @@ All configuration is managed through a `.env` file in the project root. A templa
 
 ## Usage
 
-### Step 1: Start BRL-CAD with the Tcl Listener
+### Step 1: Start the BRL-CAD libmcpcad Listener
 
-Open MGED and create (or open) a database, then source the listener script:
+Open MGED on a database and start the listener with the native `mcp_listen`
+command (loopback only, port matches `BRLCAD_PORT`):
 
 ```bash
 mged my_model.g
@@ -120,17 +122,20 @@ mged my_model.g
 Inside the MGED console:
 
 ```tcl
-source /path/to/brlcad-mcp/scripts/listener.tcl
+mcp_listen 5555
 ```
 
 You should see:
 
 ```
-=================================================
- BRL-CAD AI Bridge active.
- Listening for MCP commands on localhost:5555...
-=================================================
+mcp_listen: listening on 127.0.0.1:5555
 ```
+
+> Building BRL-CAD with the `mcp_listen` command requires the
+> [`libmcpcad` branch](https://github.com/rs0125/brlcad/tree/libmcpcad).
+> For experimentation without an MGED GUI, that branch also builds a
+> standalone `mcpcad_test_server <port> <db.g>` harness exposing the same
+> protocol.
 
 ### Step 2: Run the Agent Client
 
@@ -301,6 +306,30 @@ If you create a new tool module (e.g., `transforms.py`), import it in `src/brlca
 
 ---
 
+## Testing
+
+The suite needs **no BRL-CAD build and no API key** for the deterministic
+tests: a `MockListener` (in `tests/conftest.py`) speaks the exact libmcpcad
+frame protocol and runs a small stateful fake-MGED, so the real transport,
+tools, and agent are exercised end to end over a loopback socket.
+
+```bash
+pip install -e '.[dev]'
+
+# deterministic tests — fast, hermetic, CI-safe (no network, no LLM)
+pytest
+
+# also run the natural-language tests (real LLM; needs OPENAI_API_KEY, costs money)
+pytest --run-llm
+```
+
+Natural-language tests are marked `llm` and skipped by default. They drive
+the real LangGraph agent against the mock listener and assert on the
+resulting fake-database state, so they validate the full
+prompt → LLM → tool → transport chain without a live BRL-CAD instance.
+
+---
+
 ## Project Structure
 
 ```
@@ -327,14 +356,21 @@ brlcad-mcp/
 │       │       └── execution.py     # execute_command + analyze_command_error tools
 │       └── transport/
 │           ├── __init__.py
-│           └── socket_bridge.py     # Persistent TCP connection to BRL-CAD
-├── scripts/
-│   └── listener.tcl                 # Tcl socket bridge for BRL-CAD MGED
+│           └── socket_bridge.py     # Persistent libmcpcad frame connection
 ├── tests/
 │   ├── __init__.py
+│   ├── conftest.py                  # MockListener (fake MGED) + fixtures
 │   ├── test_config.py
-│   ├── test_transport.py
-│   └── test_tools.py
+│   ├── test_helpers.py
+│   ├── test_transport.py            # real bridge ↔ mock frame listener
+│   ├── test_tools.py
+│   ├── test_discovery.py
+│   └── test_agent_nl.py             # natural-language tests (opt-in: --run-llm)
+├── examples/
+│   └── nl_demo.py                   # scripted natural-language walkthrough
+├── legacy/
+│   ├── README.md
+│   └── listener.tcl                 # superseded Tcl uplevel listener
 ├── .env.example                     # Template for environment variables
 ├── .gitignore
 ├── pyproject.toml                   # PEP 621 packaging + tool config

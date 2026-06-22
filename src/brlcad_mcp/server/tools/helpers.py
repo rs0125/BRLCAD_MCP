@@ -1,7 +1,9 @@
 """Shared constants and helpers for the tool modules.
 
-All error detection relies on the ``SUCCESS: `` / ``ERROR: `` prefix that
-the Tcl listener (``listener.tcl``) adds to every response.
+All error detection relies on the ``SUCCESS: `` / ``ERROR: `` prefix.  The
+transport layer (:mod:`brlcad_mcp.transport.socket_bridge`) produces these
+by translating the libmcpcad listener's ``OK`` / ``ERR <code>`` frame status
+into the prefix the tools below key off of.
 """
 
 from __future__ import annotations
