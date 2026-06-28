@@ -5,12 +5,43 @@ from __future__ import annotations
 import asyncio
 import sys
 
+from langchain_core.messages import trim_messages
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
 from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.prebuilt import create_react_agent
 
 from brlcad_mcp.config import settings
+
+# Sliding context window: the agent is shown at most this many of the most
+# recent messages on each turn (a turn is a user message plus the assistant
+# / tool messages it triggers, so this is roughly the last 3-5 turns).  The
+# checkpointer still records full history; this only bounds what the model
+# reasons over, so older context is "forgotten" for inference and token
+# growth stays bounded on long sessions.
+MEMORY_WINDOW_MESSAGES = 24
+
+
+def _window_messages(state):
+    """pre_model_hook: pin the model's context to the recent window.
+
+    Trims from the end, but starts the window on a human message so a
+    tool-result message is never sent without its originating tool call
+    (which the chat API rejects).
+    """
+    windowed = trim_messages(
+        state["messages"],
+        strategy="last",
+        token_counter=len,  # count messages, not tokens
+        max_tokens=MEMORY_WINDOW_MESSAGES,
+        start_on="human",
+        end_on=("human", "tool"),
+        include_system=False,
+        allow_partial=False,
+    )
+    # llm_input_messages affects only this model call; full history is kept.
+    return {"llm_input_messages": windowed}
 
 # ---------------------------------------------------------------------------
 # System prompt — guides the agent to prefer dedicated tools but fall back
@@ -40,6 +71,17 @@ or overwrite the existing object**.  Instead, pick a new unique name by
 appending an incrementing number (e.g. ``sphere1.s``, ``sphere2.s``) and
 retry.  Only delete or overwrite objects when the user explicitly asks.
 
+## Conversation memory
+
+You retain the recent conversation (a sliding window of the last several
+turns).  When the user refers to "the sphere", "it", "that object", or
+"make it bigger", resolve the reference from objects you created or
+discussed in that recent context — do NOT ask the user to name it again.
+If the reference predates your memory window or is genuinely ambiguous,
+recover it from the live scene (``ls`` / ``search``) rather than guessing
+or asking.  If exactly one object of the relevant type exists, that is the
+referent.
+
 ## Be proactive
 
 Never ask the user for information you can look up yourself.  Query the
@@ -48,6 +90,17 @@ scene first:
 - ``execute_command("l <obj>")`` — inspect an object.
 - ``execute_command("search . -type sph")`` — find primitives by type.
 - ``execute_command("bb <obj>")`` — bounding box.
+
+## Analytics & measurement
+
+For quantitative questions — volume, surface area, mass, centroid, bounding
+box — use BRL-CAD's own analysis rather than computing by hand.  The engine
+is the source of truth; do NOT plug radii into formulas yourself.
+- ``execute_command("analyze <obj>")`` — engine-computed volume and surface
+  area for a primitive or region.
+- ``execute_command("bb <obj>")`` — bounding-box dimensions and volume.
+Report the engine's numbers, with units.  If several objects are nested or
+overlapping, say so rather than summing their volumes blindly.
 
 ## Tool strategy
 
@@ -76,14 +129,24 @@ Prefer ``db adjust`` (stateless) over ``sed``/``oscale``/``accept``:
 | Delete ALL objects | ``killall *`` |
 | Delete one object | ``killall <name>`` |
 
-## MGED glob patterns
+## Wildcard / pattern operations — IMPORTANT
 
-MGED commands handle ``*`` glob expansion internally on database object
-names.  Unlike a Unix shell, Tcl does NOT expand ``*`` — it passes it
-through to MGED, which matches against database objects.  Examples:
-- ``killall *`` — delete every object
-- ``draw *`` — draw every object
-- ``killall sphere*`` — delete all objects starting with "sphere"
+Wildcards (``*``) are NOT expanded for action commands over this interface.
+A command like ``killall box*`` or ``draw sphere*`` reaches the engine as the
+literal string ``box*``, matches nothing, and reports success while doing
+nothing (MGED's interactive shell expands globs before execution, but this
+headless interface does not).  NEVER rely on ``*`` in kill/killall/draw/erase.
+
+To operate on multiple objects by pattern, **resolve the names first, then
+act on them explicitly**:
+1. ``execute_command("search . -name 'box*'")`` — ``search`` DOES match
+   patterns and returns the actual object names (one per line).  Use
+   ``search . -type sph`` to match by primitive type.
+2. Issue the action with the explicit names you got back, e.g.
+   ``execute_command("kill box1 box2 box3")``.
+
+If ``search`` returns nothing, there are no matches — report that honestly
+rather than claiming the operation succeeded.
 """
 
 def _build_model() -> ChatOpenAI:
@@ -121,11 +184,19 @@ async def run_agent() -> None:
         tools = await load_mcp_tools(session)
         print(f"Successfully loaded {len(tools)} tool(s) from BRL-CAD!")
 
+        # A checkpointer gives the agent conversational memory: every turn
+        # is appended to a persisted message history keyed by thread_id, so
+        # the agent remembers what it built and can resolve references like
+        # "the sphere", "it", or "make it bigger" without re-asking.
         agent = create_react_agent(
             model,
             tools,
             prompt=SYSTEM_PROMPT,
+            checkpointer=MemorySaver(),
+            pre_model_hook=_window_messages,
         )
+        # One stable thread for the whole interactive session.
+        config = {"configurable": {"thread_id": "mged-session"}}
 
         print("\n=================================================")
         print(" BRL-CAD Terminal Agent Active. Type 'exit' to quit.")
@@ -146,6 +217,7 @@ async def run_agent() -> None:
             async for event in agent.astream_events(
                 {"messages": [("user", user_input)]},
                 version="v2",
+                config=config,
             ):
                 kind = event["event"]
 
