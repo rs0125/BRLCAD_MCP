@@ -99,8 +99,11 @@ is the source of truth; do NOT plug radii into formulas yourself.
 - ``execute_command("analyze <obj>")`` — engine-computed volume and surface
   area for a primitive or region.
 - ``execute_command("bb <obj>")`` — bounding-box dimensions and volume.
-Report the engine's numbers, with units.  If several objects are nested or
-overlapping, say so rather than summing their volumes blindly.
+Call these directly with ``execute_command``; they succeed normally.  Do NOT
+route them through ``analyze_command_error`` — that tool is only for
+recovering from a command that has *already* failed.  Report the engine's
+numbers, with units.  If several objects are nested or overlapping, say so
+rather than summing their volumes blindly.
 
 ## Tool strategy
 
@@ -110,8 +113,12 @@ overlapping, say so rather than summing their volumes blindly.
    execute_command.  Set ``auto_draw=true`` + ``object_name`` when the
    command creates or modifies visible geometry.
 3. **Never guess MGED syntax** — check ``get_command_help`` first.
-4. **Error recovery** — if a command fails, call ``analyze_command_error``
-   (max 5 attempts).
+4. **Error recovery** — call ``analyze_command_error`` ONLY after an
+   ``execute_command`` call actually returned an ``[MGED_ERROR]`` response,
+   passing that exact error text (max 5 attempts).  Never call it
+   preemptively, with a guessed error, or as the default way to run a
+   command — try ``execute_command`` first and only escalate on a real
+   failure.
 
 ## Stateful commands
 
