@@ -10,6 +10,7 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.errors import GraphRecursionError
 from langgraph.prebuilt import create_react_agent
 
 from brlcad_mcp.config import settings
@@ -133,8 +134,33 @@ Prefer ``db adjust`` (stateless) over ``sed``/``oscale``/``accept``:
 | Scale a sphere | ``db adjust <name> r <new_radius>`` |
 | Move a primitive | ``db adjust <name> V {<x> <y> <z>}`` |
 | Create a database | ``opendb <name>.g y`` |
-| Delete ALL objects | ``killall *`` |
 | Delete one object | ``killall <name>`` |
+| Delete many | resolve names via ``search`` first, then ``kill a b c`` |
+
+## Color — IMPORTANT
+
+To set color, ALWAYS use ``comb_color <object> <r> <g> <b>``.  It is
+non-interactive and works on any combination or region.
+- Whole model / assembly: ONE command on the top combination —
+  ``comb_color havoc 255 105 180``.  Color is inherited down the tree, so do
+  NOT loop over child regions.  To make an entire model one color, that
+  single command is the whole job.
+- A single part: ``comb_color <region> <r> <g> <b>``.
+
+Do NOT use ``mater`` to set color over this interface — with color arguments
+it drops into an interactive R/G/B prompt that this headless path cannot
+answer, so it fails.  Do NOT use ``color`` — that is the region-id color
+*table* (``color <low> <high> <r> <g> <b>``), not a per-object command.
+
+## Quoting — IMPORTANT
+
+The listener parses commands with a splitter that recognizes ONLY double
+quotes, not single quotes.  Always use double quotes (or no quotes) around
+any argument that contains a wildcard or space.  A single-quoted argument
+like ``-name '*'`` is passed through literally (the quotes become part of
+the string) and will match nothing.
+- correct:   ``search . -name "*"``
+- broken:    ``search . -name '*'``
 
 ## Wildcard / pattern operations — IMPORTANT
 
@@ -146,11 +172,14 @@ headless interface does not).  NEVER rely on ``*`` in kill/killall/draw/erase.
 
 To operate on multiple objects by pattern, **resolve the names first, then
 act on them explicitly**:
-1. ``execute_command("search . -name 'box*'")`` — ``search`` DOES match
-   patterns and returns the actual object names (one per line).  Use
-   ``search . -type sph`` to match by primitive type.
-2. Issue the action with the explicit names you got back, e.g.
-   ``execute_command("kill box1 box2 box3")``.
+1. ``execute_command("search . -name \\"*\\"")`` — ``search`` DOES match
+   patterns and returns the actual object names (one per line).  Use double
+   quotes around the pattern.  ``search . -type region`` matches by type
+   (color/material lives on regions, so that is usually what you want for a
+   whole-model recolor).  ``search .`` with no filter lists everything.
+2. Issue the action with the explicit names you got back.  If the list is
+   large, batch several names per command, e.g.
+   ``execute_command("kill a b c d e")``.
 
 If ``search`` returns nothing, there are no matches — report that honestly
 rather than claiming the operation succeeded.
@@ -202,8 +231,13 @@ async def run_agent() -> None:
             checkpointer=MemorySaver(),
             pre_model_hook=_window_messages,
         )
-        # One stable thread for the whole interactive session.
-        config = {"configurable": {"thread_id": "mged-session"}}
+        # One stable thread for the whole interactive session.  recursion_limit
+        # caps ReAct steps per turn; if a request thrashes we want it to stop
+        # and report, not run away (and never crash the REPL).
+        config = {
+            "configurable": {"thread_id": "mged-session"},
+            "recursion_limit": 50,
+        }
 
         print("\n=================================================")
         print(" BRL-CAD Terminal Agent Active. Type 'exit' to quit.")
@@ -221,40 +255,52 @@ async def run_agent() -> None:
 
             print("AI is thinking...\n")
             final_answer = ""
-            async for event in agent.astream_events(
-                {"messages": [("user", user_input)]},
-                version="v2",
-                config=config,
-            ):
-                kind = event["event"]
+            try:
+                async for event in agent.astream_events(
+                    {"messages": [("user", user_input)]},
+                    version="v2",
+                    config=config,
+                ):
+                    kind = event["event"]
 
-                # ── Agent is calling a tool ──
-                if kind == "on_tool_start":
-                    tool_name = event.get("name", "unknown")
-                    tool_input = event.get("data", {}).get("input", "")
-                    print(f"  ▸ Calling tool: {tool_name}")
-                    if tool_input:
-                        preview = str(tool_input)
-                        if len(preview) > 200:
-                            preview = preview[:200] + "…"
-                        print(f"    Input: {preview}")
+                    # ── Agent is calling a tool ──
+                    if kind == "on_tool_start":
+                        tool_name = event.get("name", "unknown")
+                        tool_input = event.get("data", {}).get("input", "")
+                        print(f"  ▸ Calling tool: {tool_name}")
+                        if tool_input:
+                            preview = str(tool_input)
+                            if len(preview) > 200:
+                                preview = preview[:200] + "…"
+                            print(f"    Input: {preview}")
 
-                # ── Tool returned a result ──
-                elif kind == "on_tool_end":
-                    tool_output = event.get("data", {}).get("output", "")
-                    output_str = str(tool_output)
-                    if len(output_str) > 300:
-                        output_str = output_str[:300] + "…"
-                    print(f"    ✓ Result: {output_str}\n")
+                    # ── Tool returned a result ──
+                    elif kind == "on_tool_end":
+                        tool_output = event.get("data", {}).get("output", "")
+                        output_str = str(tool_output)
+                        if len(output_str) > 300:
+                            output_str = output_str[:300] + "…"
+                        print(f"    ✓ Result: {output_str}\n")
 
-                # ── LLM produced a final text reply (no tool calls) ──
-                elif kind == "on_chat_model_end":
-                    output = event.get("data", {}).get("output")
-                    if output:
-                        tool_calls = getattr(output, "tool_calls", [])
-                        content = getattr(output, "content", "")
-                        if not tool_calls and content:
-                            final_answer = content
+                    # ── LLM produced a final text reply (no tool calls) ──
+                    elif kind == "on_chat_model_end":
+                        output = event.get("data", {}).get("output")
+                        if output:
+                            tool_calls = getattr(output, "tool_calls", [])
+                            content = getattr(output, "content", "")
+                            if not tool_calls and content:
+                                final_answer = content
+            except GraphRecursionError:
+                print(
+                    "AI: I couldn't complete that within my step budget — the "
+                    "approach wasn't converging. Try rephrasing, or ask for a "
+                    "smaller step."
+                )
+                continue
+            except Exception as exc:  # keep the REPL alive on any turn failure
+                print(f"AI: that turn failed ({type(exc).__name__}: {exc}). "
+                      "The session is still open — try again.")
+                continue
 
             if final_answer:
                 print(f"AI: {final_answer}")
