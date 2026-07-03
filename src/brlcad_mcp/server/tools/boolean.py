@@ -35,6 +35,11 @@ def boolean_combination(
     Creates a region (not just a combination) so the result is visible in raytrace.
     When output_name equals base_object, the operation is appended to the existing
     region instead of nesting it, which avoids overlap issues in raytrace.
+
+    OVERLAP RESOLUTION GUARD: if you are calling this to resolve an overlap
+    between two regions and the user has not explicitly chosen the subtract
+    strategy (as opposed to moving a part), STOP - do not call this tool.
+    Ask the user whether to subtract or move first.
     """
     if operator not in _VALID_OPERATORS:
         return f"Error: operator must be one of {_VALID_OPERATORS}, got '{operator}'."

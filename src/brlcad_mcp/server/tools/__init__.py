@@ -9,4 +9,6 @@
 from brlcad_mcp.server.tools import boolean as boolean  # noqa: F401
 from brlcad_mcp.server.tools import discovery as discovery  # noqa: F401
 from brlcad_mcp.server.tools import execution as execution  # noqa: F401
+from brlcad_mcp.server.tools import geometry_ops as geometry_ops  # noqa: F401
+from brlcad_mcp.server.tools import health as health  # noqa: F401
 from brlcad_mcp.server.tools import primitives as primitives  # noqa: F401
