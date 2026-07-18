@@ -55,12 +55,30 @@ class ServerConfig:
 
 
 @dataclass(frozen=True)
+class RenderConfig:
+    """Settings for the headless rt renderer.
+
+    Rendering shells out to BRL-CAD's ``rt`` and ``pix-png``, so the server
+    must run where those tools are available.  ``bin_dir`` points at the
+    BRL-CAD ``bin`` directory when they are not already on ``PATH``.
+    """
+
+    bin_dir: str = field(default_factory=lambda: os.getenv("BRLCAD_BIN", ""))
+    output_dir: str = field(
+        default_factory=lambda: os.getenv(
+            "BRLCAD_RENDER_DIR", os.path.expanduser("~/brlcad_renders")
+        )
+    )
+
+
+@dataclass(frozen=True)
 class Settings:
     """Top-level settings container aggregating all sub-configs."""
 
     brlcad: BRLCADConfig = field(default_factory=BRLCADConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
+    render: RenderConfig = field(default_factory=RenderConfig)
 
 
 # Module-level singleton — import and use directly

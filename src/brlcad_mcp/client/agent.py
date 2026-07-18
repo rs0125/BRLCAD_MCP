@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 
 from langchain_core.messages import trim_messages
@@ -314,6 +315,9 @@ async def run_agent() -> None:
                 "command": sys.executable,
                 "args": ["-m", "brlcad_mcp.server"],
                 "transport": "stdio",
+                # pass our env (BRLCAD_PORT/BIN/RENDER_DIR, LD_LIBRARY_PATH...)
+                # through to the server subprocess so its tools can use them
+                "env": dict(os.environ),
             }
         }
     )
