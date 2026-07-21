@@ -1,28 +1,30 @@
-"""MCP tool — headless model rendering with rt.
+"""MCP tool — headless model rendering.
+
+Everything renders over the socket via the ged ``rt`` command, which raytraces
+the database the listener already has open (it uses ``gedp->dbip``).  So no
+``.g`` path is needed and we never send ``opendb`` -- which sidesteps the MGED
+opendb-callback crash (see docs/opendb-mged-crash.md).  We draw the object, set
+the view, then fire ``rt``; ged_rt is async, so we poll for the output to
+finish.
 
 Three lighting modes:
 
-* ``ambient`` (default): a normal opaque render.  One rt pass, auto-framed on
-  the object, with high ambient light and ambient occlusion.  Makes no changes
-  to the database.
-* ``studio``: a three-point, camera-RELATIVE light rig (key / fill / rim).  The
-  rig rotates with the camera, so every angle is lit the same way -- ideal for
-  consistent multi-angle product shots.
+* ``studio`` (default): a three-point, camera-RELATIVE light rig (key/fill/rim).
+  The rig rotates with the camera, so every angle is lit the same way -- ideal
+  for consistent multi-angle product shots.
 * ``model``: a three-point, WORLD-fixed rig.  The lights stay put relative to
   the model, so different camera angles show it lit from different sides -- a
   scene / fixed-sun look.
+* ``ambient``: a normal opaque render with no rig -- high ambient light plus
+  ambient occlusion.  Makes no lighting changes to the database.
 
-Both rig modes create temporary light regions in the database, render with a
-locked view so the far-off lights do not shrink the model in frame, then remove
-the temp lights afterwards.
+The rig modes build their light regions on the live database over the socket,
+read the current view (size/eye_pt/center) to place the rig, draw the invisible
+lights, render, then remove the temp lights afterwards.
 
-``rt`` and ``pix-png`` run as subprocesses, so the server must run where
-BRL-CAD's tools are available (or set ``BRLCAD_BIN`` to their directory).  The
-``.g`` path is discovered from the live listener via ``opendb``, or passed
-explicitly as ``db_path``.
-
-Transparent / x-ray rendering is a separate case, layered on top of the
-``studio`` lighting, and is handled by its own tool.
+The only subprocess left is ``pix-png`` (rt writes a ``.pix`` that we convert to
+PNG), so the server must run where BRL-CAD's tools are on PATH, or set
+``BRLCAD_BIN`` to their directory.
 """
 
 from __future__ import annotations

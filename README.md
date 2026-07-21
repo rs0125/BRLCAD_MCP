@@ -26,7 +26,7 @@ BRL-CAD is a powerful open-source Constructive Solid Geometry (CSG) modeling sys
 The system is built on three layers:
 
 1. **libmcpcad Listener** -- the native BRL-CAD command listener (the `mcp_listen` command in MGED), which accepts commands over a length-prefixed local socket and executes them through the C `ged_exec()` pipeline, returning `OK` / `ERR <code>` framed responses. (See the [`libmcpcad` branch](https://github.com/rs0125/brlcad/tree/libmcpcad).)
-2. **MCP Tool Server** -- a Python FastMCP server that exposes typed, validated tool functions (sphere creation, boolean operations, dynamic command discovery, and generic command execution) to any MCP-compatible client.
+2. **MCP Tool Server** -- a Python FastMCP server that exposes typed, validated tool functions (sphere creation, boolean operations, dynamic command discovery, generic command execution, overlap resolution, model health auditing, and rendering) to any MCP-compatible client.
 3. **LangGraph Agent Client** -- a ReAct agent that reasons about user requests, selects the appropriate tools, and orchestrates multi-step modeling operations with real-time tool-call visibility.
 
 ---
@@ -37,7 +37,7 @@ The system is composed of three layers that communicate in a chain:
 
 - **Client** (`client/agent.py`) — A LangGraph ReAct agent that takes natural-language input from the user, reasons about the request, and decides which MCP tool(s) to call. It maintains a **persistent MCP session** with the server subprocess over **stdio**, so all tool calls share the same server process and TCP connection to MGED.
 
-- **Server** (`server/app.py` + `server/tools/*`) — A FastMCP tool server that exposes 8 typed, validated tools: 4 dedicated geometry tools (sphere, cylinder, box, booleans) and 4 meta-tools for dynamic command discovery and execution. When a tool is invoked, it builds the corresponding MGED command and sends it to BRL-CAD over a **persistent** connection via the transport layer (`transport/socket_bridge.py`). Responses are keyed off `SUCCESS:`/`ERROR:` prefixes that the transport derives from the listener's framed status.
+- **Server** (`server/app.py` + `server/tools/*`) — A FastMCP tool server that exposes 12 typed, validated tools: dedicated geometry tools (sphere, cylinder, box, booleans), meta-tools for dynamic command discovery and execution, and higher-level tools for overlap resolution, model health auditing, and rendering. When a tool is invoked, it builds the corresponding MGED command(s) and sends them to BRL-CAD over a **persistent** connection via the transport layer (`transport/socket_bridge.py`). Responses are keyed off `SUCCESS:`/`ERROR:` prefixes that the transport derives from the listener's framed status.
 
 - **Transport** (`transport/socket_bridge.py`) — Speaks the libmcpcad length-prefixed frame protocol (`MC` + u32 big-endian length + payload) in both directions, keeping a single long-lived connection so MGED state persists across calls. It translates the listener's `OK` / `ERR <code>` status into the `SUCCESS:` / `ERROR:` prefix the tools expect. The command text on the wire is plain MGED syntax — only the framing is structured.
 
@@ -102,6 +102,8 @@ All configuration is managed through a `.env` file in the project root. A templa
 | `BRLCAD_PORT`         | Port the listener (`mcp_listen`) is bound to | `5555`        |
 | `BRLCAD_TIMEOUT`      | Socket timeout in seconds                    | `5.0`         |
 | `BRLCAD_BUFFER_SIZE`  | Receive buffer size in bytes                 | `4096`        |
+| `BRLCAD_BIN`          | Directory with BRL-CAD binaries (`pix-png`); needed for rendering | (system `PATH`) |
+| `BRLCAD_RENDER_DIR`   | Directory where rendered images are written  | `~/brlcad_renders` |
 | `MCP_TRANSPORT`       | MCP transport type                           | `stdio`       |
 
 **Important:** Never commit your `.env` file. It is already included in `.gitignore`.
@@ -156,7 +158,7 @@ You should see:
 
 ```
 Starting local MCP Client...
-Successfully loaded 8 tool(s) from BRL-CAD!
+Successfully loaded 12 tool(s) from BRL-CAD!
 
 =================================================
  BRL-CAD Terminal Agent Active. Type 'exit' to quit.
@@ -179,7 +181,7 @@ Type `exit` or `quit` to terminate the session.
 
 ## Available Tools
 
-The MCP server currently exposes **8 tools** organised into two groups:
+The MCP server currently exposes **12 tools** organised into four groups: dedicated geometry tools, meta-tools for dynamic command discovery/execution, geometry-analysis tools, and rendering.
 
 ### Dedicated Geometry Tools
 
@@ -256,6 +258,28 @@ Execute an arbitrary MGED command string. Supports `auto_draw` and `object_name`
 #### `analyze_command_error`
 
 Diagnose a failed MGED command: fetches help text, checks object existence, and executes a corrected command. Supports up to 5 retry attempts to prevent infinite loops.
+
+### Geometry Analysis Tools
+
+These run BRL-CAD's own analysers over the socket and summarise the results for the agent.
+
+#### `model_health_report`
+
+Audit an object with BRL-CAD's validators (lint checks plus `gqa` overlap detection on a fixed grid) and return a single grouped health report. Uses `gqa -g <grid>` so it never hangs on coincident faces.
+
+#### `separate_overlap`
+
+Resolve a single overlapping pair non-destructively by sliding the smaller part clear along the exit axis. Refuses bare solids and reports a part's parents so the caller can confirm it is moving the meaningful assembly, not a leaf.
+
+#### `resolve_overlaps`
+
+Sweep an assembly for overlaps and resolve each by minimal sliding, re-running `gqa` to verify. Greedy per-pair (nested cascades may need several passes); it moves parts, it does not subtract geometry.
+
+### Rendering
+
+#### `render_model`
+
+Render the model the listener currently has open to a PNG, over the socket via the ged `rt` command (no `.g` path needed, no `opendb`). View presets (iso, front, side, top, back, and rear-quarter isometrics) or a custom azimuth/elevation, at three lighting levels: `studio` (default, camera-relative three-point rig — every angle lit the same), `model` (world-fixed rig — fixed-sun look), and `ambient` (evenly-lit, no rig). Requires `pix-png` on `PATH` or `BRLCAD_BIN` set.
 
 ---
 
@@ -353,7 +377,10 @@ brlcad-mcp/
 │       │       ├── primitives.py    # Sphere, cylinder, box creation tools
 │       │       ├── boolean.py       # CSG boolean operations
 │       │       ├── discovery.py     # list_commands + get_command_help tools
-│       │       └── execution.py     # execute_command + analyze_command_error tools
+│       │       ├── execution.py     # execute_command + analyze_command_error tools
+│       │       ├── geometry_ops.py  # separate_overlap + resolve_overlaps tools
+│       │       ├── health.py        # model_health_report tool
+│       │       └── rendering.py     # render_model tool (rt over the socket)
 │       └── transport/
 │           ├── __init__.py
 │           └── socket_bridge.py     # Persistent libmcpcad frame connection
@@ -365,6 +392,7 @@ brlcad-mcp/
 │   ├── test_transport.py            # real bridge ↔ mock frame listener
 │   ├── test_tools.py
 │   ├── test_discovery.py
+│   ├── test_rendering.py            # render tool logic (hermetic)
 │   └── test_agent_nl.py             # natural-language tests (opt-in: --run-llm)
 ├── examples/
 │   └── nl_demo.py                   # scripted natural-language walkthrough
