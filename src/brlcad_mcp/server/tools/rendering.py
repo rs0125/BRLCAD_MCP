@@ -29,8 +29,8 @@ from __future__ import annotations
 
 import math
 import os
-import re
 import subprocess
+import time
 from pathlib import Path
 
 from pydantic import Field
@@ -40,13 +40,20 @@ from brlcad_mcp.server.app import mcp
 from brlcad_mcp.server.tools.helpers import is_error_response, parse_response
 from brlcad_mcp.transport import send_command
 
-# View presets -> (azimuth, elevation) in degrees.
+# View presets -> (azimuth, elevation) in degrees.  iso/iso2 are the two
+# front-quarter isometrics; iso_back/iso_back2 are their rear-quarter mirrors
+# (azimuth 180 +/- 35) for back three-quarter shots.
 _VIEWS = {
     "iso": (35, 25),
     "iso2": (325, 25),
+    "iso_back": (215, 25),
+    "iso_back2": (145, 25),
     "front": (0, 0),
+    "back": (180, 0),
     "side": (90, 0),
+    "side2": (270, 0),
     "top": (0, 90),
+    "bottom": (0, -90),
     "rear": (180, 0),
 }
 
@@ -67,19 +74,24 @@ _VIEWS = {
 # -- verified across a ~13x size range (jeep, m35, havoc).  Scaling brightness
 # by size would actually make large models over-bright relative to small ones.
 _RIG = [
-    ("key", (-1.0, 0.9, -0.7), 3.5, 12),
-    ("fill", (1.0, 0.2, -0.5), 1.5, 0),
-    ("rim", (0.1, 1.0, 0.9), 2.0, 8),
+    ("key", (-1.0, 0.9, -0.7), 4.5, 12),
+    ("fill", (1.0, 0.2, -0.5), 2.2, 0),
+    ("rim", (0.1, 1.0, 0.9), 2.8, 8),
 ]
 # Model-relative 3-point rig: same idea, but offsets are along the WORLD axes
 # (X, Y, Z with Z up) instead of the camera basis.  The lights are fixed to the
 # model, so rotating the camera reveals it lit from different sides (a scene /
 # fixed-sun look) rather than the consistent-per-view look of the camera rig.
 # Factors are (X, Y, Z), multiplied by the view size.  Front is taken as -Y.
+# The default views (iso/iso2, ae 35/325 el 25) put the camera in the +X/+Z half
+# looking at the +Y and -Y faces, so the key sits front-right-high (+X,+Y,+Z) to
+# actually light what those views see, the fill covers the -Y (iso2) side, and
+# the rim comes over the top-back for separation.  Brightnesses are a touch hot
+# so the fixed-sun look reads without washing the material colour.
 _MODEL_RIG = [
-    ("key", (-0.9, -1.0, 1.3), 3.5, 12),
-    ("fill", (1.1, -0.2, 0.4), 1.5, 0),
-    ("rim", (0.1, 1.2, 1.2), 2.0, 8),
+    ("key", (0.9, 0.8, 1.2), 4.0, 12),
+    ("fill", (0.6, -1.0, 0.4), 2.2, 0),
+    ("rim", (-0.9, 0.4, 1.5), 2.5, 8),
 ]
 _LIGHT_RADIUS_FRAC = 0.03  # light sphere radius as a fraction of view size
 _LIGHT_PREFIX = "_rndrlight_"
@@ -116,47 +128,6 @@ def _subprocess_env() -> dict:
                 cur = env.get(var, "")
                 env[var] = lib + (os.pathsep + cur if cur else "")
     return env
-
-
-def _discover_db() -> str:
-    """Ask the live listener which .g it currently has open."""
-    try:
-        resp = send_command("opendb")
-    except (ConnectionError, TimeoutError):
-        return ""
-    if is_error_response(resp):
-        return ""
-    return parse_response(resp).strip()
-
-
-def _frame(db: str, obj: str, az: float, el: float):
-    """Pass 1: frame rt on *obj* alone and scrape the view it chose.
-
-    Returns (viewsize, eye_pt, orientation, center) with the first three as the
-    raw strings rt printed (fed straight back to rt in pass 2) and center as a
-    3-tuple derived from the reported model bounds.
-    """
-    r = subprocess.run(
-        [_bin("rt"), "-a", str(az), "-e", str(el), "-s", "16", "-o",
-         os.devnull, db, *obj.split()],
-        capture_output=True, text=True, timeout=120, env=_subprocess_env(),
-    )
-    size = eye = ori = None
-    center = (0.0, 0.0, 0.0)
-    for ln in r.stderr.splitlines():
-        s = ln.strip()
-        if s.startswith("Size:"):
-            size = s.split(":", 1)[1].strip().rstrip("m")
-        elif s.startswith("Eye_pos:"):
-            eye = s.split(":", 1)[1].replace(",", " ").strip()
-        elif s.startswith("Orientation:"):
-            ori = s.split(":", 1)[1].replace(",", " ").strip()
-        elif s.startswith("Model:"):
-            nums = [float(n) for n in re.findall(r"-?\d+\.?\d*", s)]
-            if len(nums) >= 6:
-                center = ((nums[0] + nums[1]) / 2, (nums[2] + nums[3]) / 2,
-                          (nums[4] + nums[5]) / 2)
-    return size, eye, ori, center
 
 
 def _rig_positions(eye: str, center, size: str):
@@ -224,6 +195,128 @@ def _remove_lights(names):
             pass
 
 
+def _rt_opts(size, amb, ambient_samples, quality):
+    """Build the rt option string shared by both ged_rt render paths."""
+    opts = f"-s {size} -A {amb:g}"
+    if quality == "clean":
+        opts += " -H 8 -J 1"
+    if ambient_samples > 0:
+        opts += f' -c "set ambSamples={ambient_samples}"'
+    return opts
+
+
+def _ged_rt_and_wait(opts, pix, size):
+    """Fire `rt` over the socket and wait for the .pix to finish.
+
+    ged_rt is async -- it launches rt and returns immediately -- so we poll for
+    the file to reach its full size (W*H*3 bytes).  Returns None on success or an
+    error string.
+    """
+    resp = send_command(f"rt {opts} -o {pix}")
+    if is_error_response(resp):
+        return f"Error: ged_rt failed: {parse_response(resp)}"
+    expected = size * size * 3
+    deadline = time.time() + 600
+    while time.time() < deadline:
+        if os.path.exists(pix) and os.path.getsize(pix) >= expected:
+            return None
+        time.sleep(0.1)
+    return "Error: ged_rt render timed out (no complete .pix produced)."
+
+
+def _draw_objects(obj):
+    """Draw each top object; return an error string on the first bad name."""
+    for o in obj.split():
+        resp = send_command(f"draw {o}")
+        if is_error_response(resp):
+            return (f"Error drawing '{o}': {parse_response(resp)} -- is it a "
+                    f"valid object? Run 'tops' to list the objects.")
+    return None
+
+
+def _view_params():
+    """Read the listener's current view over the socket.
+
+    Returns (viewsize_str, eye_str, center_tuple) in mm, or None if any getter
+    returns something unparseable.  `size` is the view diagonal, `eye_pt` the
+    camera position, `center` the view center -- exactly the inputs the light rig
+    needs, so we no longer scrape them from a subprocess rt.
+    """
+    vsize = parse_response(send_command("size")).strip()
+    eye = parse_response(send_command("eye_pt")).strip()
+    cen = parse_response(send_command("center")).strip().split()
+    try:
+        center = tuple(float(v) for v in cen[:3])
+        float(vsize)
+        [float(v) for v in eye.split()]
+    except (ValueError, IndexError):
+        return None
+    if len(center) != 3 or len(eye.split()) != 3:
+        return None
+    return vsize, eye, center
+
+
+def _render_via_ged_rt(obj, az, el, size, amb, ambient_samples, quality, pix):
+    """Ambient render over the socket with the ged `rt` command.
+
+    ged_rt renders the listener's OWN open database (it uses gedp->dbip), so we
+    need NO db path and never send `opendb` -- which sidesteps the MGED opendb
+    crash entirely.  It renders the *displayed* objects, so we draw first, set
+    the view, then rt.  Returns None on success or an error string.
+
+    Side effect: this draws `obj` and changes the listener's current view
+    (ae/autoview) -- visible in a live MGED.
+    """
+    try:
+        os.remove(pix)  # clear any stale file so the poll is meaningful
+    except OSError:
+        pass
+    err = _draw_objects(obj)
+    if err:
+        return err
+    send_command(f"ae {az:g} {el:g}")
+    send_command("autoview")
+    return _ged_rt_and_wait(
+        _rt_opts(size, amb, ambient_samples, quality), pix, size)
+
+
+def _render_studio_via_ged_rt(obj, az, el, size, amb, ambient_samples,
+                              quality, lighting, pix):
+    """Studio/model render over the socket -- no db path.
+
+    Same ged_rt idea as ambient, but we first build the three-point light rig on
+    the live database: draw the object, set the view, read the view params over
+    the socket (size/eye_pt/center), place the rig relative to that view, draw
+    the (invisible) lights, then rt.  The lights are killed afterwards so the db
+    is left as we found it apart from the object staying drawn.
+    """
+    try:
+        os.remove(pix)
+    except OSError:
+        pass
+    err = _draw_objects(obj)
+    if err:
+        return err
+    send_command("units mm")  # rig math + light geometry are all in mm
+    send_command(f"ae {az:g} {el:g}")
+    send_command("autoview")
+    view = _view_params()
+    if view is None:
+        return ("Error: could not read the view parameters over the socket "
+                "(size/eye_pt/center). Is a model open in the listener?")
+    vsize, eye, center = view
+    positions = (_rig_positions(eye, center, vsize) if lighting == "studio"
+                 else _rig_positions_model(center, vsize))
+    lights = _make_lights(positions, float(vsize) * _LIGHT_RADIUS_FRAC)
+    try:
+        for n in lights:
+            send_command(f"draw {n}.r")
+        return _ged_rt_and_wait(
+            _rt_opts(size, amb, ambient_samples, quality), pix, size)
+    finally:
+        _remove_lights(lights)
+
+
 @mcp.tool()
 def render_model(
     obj: str = Field(
@@ -233,8 +326,12 @@ def render_model(
     ),
     view: str = Field(
         default="iso",
-        description="View preset: iso, iso2, front, side, top, rear. Overridden "
-        "by azimuth/elevation when those are given.",
+        description="View preset: iso, iso2 (front-quarter isometrics), iso_back, "
+        "iso_back2 (rear-quarter isometrics), front, back, side, side2, top, "
+        "bottom. For angles with no preset, pass azimuth/elevation instead "
+        "(they override this). To render several distinct views, give each a "
+        "different preset or azimuth/elevation -- repeating the same view "
+        "overwrites the same file.",
     ),
     azimuth: float | None = Field(
         default=None, description="Custom azimuth in degrees (overrides preset)."
@@ -243,7 +340,7 @@ def render_model(
         default=None, description="Custom elevation in degrees (overrides preset)."
     ),
     lighting: str = Field(
-        default="ambient",
+        default="studio",
         description="'ambient' = normal render (rt lighting + high ambient + "
         "ambient occlusion, no db changes). 'studio' = three-point camera-"
         "relative rig (each angle lit consistently). 'model' = three-point "
@@ -254,7 +351,7 @@ def render_model(
     ambient: float | None = Field(
         default=None,
         description="Ambient light fraction (rt -A). Auto-picks 1.2 for ambient "
-        "mode and 0.3 for the studio/model rigs; 1.0-1.5 gives bright, evenly-"
+        "mode and 1.0 for the studio/model rigs; 1.0-1.5 gives bright, evenly-"
         "lit shots.",
     ),
     ambient_samples: int = Field(
@@ -266,19 +363,15 @@ def render_model(
         default="clean",
         description="'draft' (no anti-aliasing, fast) or 'clean' (hypersampled).",
     ),
-    db_path: str = Field(
-        default="",
-        description="Path to the .g file to render (e.g. '~/models/ktank.g'). "
-        "Required -- if you don't know it, ask the user which database/file "
-        "they have open and pass it here.",
-    ),
 ) -> str:
     """Render *obj* to a PNG with rt and return the image path.
 
-    Does a normal opaque render.  ``lighting='ambient'`` (default) is a quick
-    evenly-lit shot; ``'studio'`` is a camera-relative three-point rig (angles
-    lit consistently); ``'model'`` is a world-fixed three-point rig (angles lit
-    from different sides).
+    Renders the model the listener currently has open, over the socket via the
+    ged ``rt`` command -- no file path is needed, so do NOT ask the user for one.
+    ``lighting='studio'`` (default) is a camera-relative three-point rig, so every
+    angle (iso, iso2, side...) is lit consistently; ``'model'`` is a world-fixed
+    three-point rig (lights stay put, so angles are lit from different sides -- a
+    fixed-sun look); ``'ambient'`` is a quick evenly-lit shot.
     """
     az, el = _VIEWS.get(view, _VIEWS["iso"])
     if azimuth is not None:
@@ -286,21 +379,8 @@ def render_model(
     if elevation is not None:
         el = elevation
 
-    # NOTE: auto-discovery via `opendb` is disabled for now -- it segfaults a
-    # live MGED listener (see docs/opendb-mged-crash.md).  Until that is fixed
-    # (or a libmcpcad-level path query is added), the caller must pass db_path;
-    # if it's missing, ask the user for it.  _discover_db() is kept for later.
-    db = db_path
-    if not db:
-        return ("I need the path to the .g file to render. Which database are "
-                "you working with? Provide it as db_path, e.g. "
-                "'~/models/ktank.g'.")
-    db = os.path.expanduser(db)
-    if not os.path.exists(db):
-        return f"Error: database file not found: {db}"
-
     amb = ambient if ambient is not None else (
-        0.3 if lighting in ("studio", "model") else 1.2)
+        1.0 if lighting in ("studio", "model") else 1.2)
     out_dir = settings.render.output_dir
     os.makedirs(out_dir, exist_ok=True)
     stem = (f"{obj.split()[0].strip('/').replace('/', '_')}_"
@@ -308,64 +388,22 @@ def render_model(
     pix = os.path.join(out_dir, stem + ".pix")
     png = os.path.join(out_dir, stem + ".png")
 
-    common = ["-s", str(size), "-A", str(amb)]
-    if quality == "clean":
-        common += ["-H", "8", "-J", "1"]
-    if ambient_samples > 0:
-        common += ["-c", f"set ambSamples={ambient_samples}"]
-
-    lights: list[str] = []
-    detail = ""
-    try:
-        if lighting in ("studio", "model"):
-            vsize, eye, ori, center = _frame(db, obj, az, el)
-            if not (vsize and eye and ori):
-                return (f"Error: could not frame '{obj}' -- it may not be a valid "
-                        f"object name. Run 'tops' to list the objects, then render "
-                        f"one of those.")
-            if lighting == "studio":
-                positions = _rig_positions(eye, center, vsize)  # camera-relative
-            else:
-                positions = _rig_positions_model(center, vsize)  # world-fixed
-            lights = _make_lights(
-                positions,
-                float(vsize) * _LIGHT_RADIUS_FRAC,  # radius scales with model
-            )
-            tops = [*obj.split(), *(f"{n}.r" for n in lights)]
-            script = (f"viewsize {vsize};\norientation {ori};\neye_pt {eye};\n"
-                      f"start 0;\nend;\n")
-            r = subprocess.run(
-                [_bin("rt"), "-M", *common, "-o", pix, db, *tops],
-                input=script, capture_output=True, text=True, timeout=600,
-                env=_subprocess_env(),
-            )
-            kind = "camera-relative" if lighting == "studio" else "world-fixed"
-            detail = f"three-point rig ({kind}), viewsize={vsize}"
-        else:
-            r = subprocess.run(
-                [_bin("rt"), "-a", str(az), "-e", str(el), *common, "-o", pix,
-                 db, *obj.split()],
-                capture_output=True, text=True, timeout=600,
-                env=_subprocess_env(),
-            )
-            detail = "ambient + occlusion"
-    except FileNotFoundError:
-        return ("Error: 'rt' not found. Install BRL-CAD, or set BRLCAD_BIN to "
-                "its bin directory.")
-    except subprocess.TimeoutExpired:
-        return "Error: render timed out. Try quality='draft' or a smaller size."
-    finally:
-        _remove_lights(lights)
-
-    if not os.path.exists(pix) or os.path.getsize(pix) == 0:
-        err = r.stderr or ""
-        # rt found no geometry -- almost always a bad/nonexistent object name.
-        if ("No primitives remaining" in err
-                or "0 solids in 0 regions" in err):
-            return (f"Error: '{obj}' has no drawable geometry -- it is probably "
-                    f"not a valid object name. Run 'tops' to list the objects in "
-                    f"this database, then render one of those.")
-        return f"Error: rt produced no output.\n{err[-500:]}"
+    # Everything renders over the socket via ged_rt on the listener's own open
+    # db -- no db path, no `opendb` (which sidesteps the MGED opendb crash).
+    if lighting == "ambient":
+        err = _render_via_ged_rt(
+            obj, az, el, size, amb, ambient_samples, quality, pix)
+        detail = "ambient + occlusion (via ged_rt over the socket)"
+    elif lighting in ("studio", "model"):
+        err = _render_studio_via_ged_rt(
+            obj, az, el, size, amb, ambient_samples, quality, lighting, pix)
+        kind = "camera-relative" if lighting == "studio" else "world-fixed"
+        detail = f"three-point rig ({kind}), via ged_rt over the socket"
+    else:
+        return (f"Error: unknown lighting mode '{lighting}'. "
+                f"Use 'ambient', 'studio', or 'model'.")
+    if err:
+        return err
 
     try:
         with open(png, "wb") as fh:

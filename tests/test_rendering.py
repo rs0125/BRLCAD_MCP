@@ -33,15 +33,12 @@ def test_rig_positions_count_and_finiteness():
     assert len({(round(p[1]), round(p[2]), round(p[3])) for p in pos}) == 3
 
 
-def test_missing_database_is_reported_gracefully():
+def test_unknown_lighting_mode_is_reported():
+    # All modes now render over the socket (no db_path). An unknown lighting
+    # mode is rejected before any socket traffic, so this stays hermetic.
     out = _render(
         obj="thing", view="iso", azimuth=None, elevation=None,
-        lighting="ambient", size=64, ambient=None, ambient_samples=0,
-        quality="draft", db_path="/no/such/file.g",
+        lighting="bogus", size=64, ambient=None, ambient_samples=0,
+        quality="draft",
     )
-    assert "not found" in out.lower()
-
-
-def test_discover_db_returns_string(listener):
-    # the mock listener has no 'opendb'; discovery must degrade to "" not crash
-    assert isinstance(R._discover_db(), str)
+    assert "unknown lighting" in out.lower()
