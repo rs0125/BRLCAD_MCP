@@ -1,8 +1,8 @@
-"""Tests for the render_model tool.
+"""Tests for the render tools.
 
-These cover the tool's logic (view presets, the light-rig geometry, graceful
-handling of a missing database) without requiring an actual BRL-CAD build --
-rt and pix-png are never invoked here.
+These cover the tools' logic (view presets, the light-rig geometry, variant
+parsing, graceful handling of unknown modes) without requiring an actual
+BRL-CAD build -- rt is never invoked here.
 """
 
 import math
@@ -31,6 +31,18 @@ def test_rig_positions_count_and_finiteness():
         assert shadows >= 0  # shadow-ray count (0 = none, >1 = soft shadows)
     # the three lights are at three distinct positions
     assert len({(round(p[1]), round(p[2]), round(p[3])) for p in pos}) == 3
+
+
+def test_parse_variants_valid_and_invalid():
+    pairs, errors = R._parse_variants("iso:studio, iso:model , front:ambient")
+    assert pairs == [("iso", "studio"), ("iso", "model"), ("front", "ambient")]
+    assert errors == []
+
+
+def test_parse_variants_rejects_bad_tokens():
+    pairs, errors = R._parse_variants("iso:studio,bogus:studio,iso:neon,justview")
+    assert pairs == [("iso", "studio")]
+    assert len(errors) == 3  # unknown view, unknown lighting, missing colon
 
 
 def test_unknown_lighting_mode_is_reported():

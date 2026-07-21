@@ -59,14 +59,20 @@ class RenderConfig:
     """Settings for the headless renderer.
 
     Rendering runs entirely over the socket via the ged ``rt`` command (which
-    writes PNG directly), so no BRL-CAD binaries or PATH are needed.  Only the
-    output directory is configurable.
+    writes PNG directly), so no BRL-CAD binaries or PATH are needed.
+
+    ``timeout`` bounds how long we wait for a single render to finish (ged_rt is
+    async, so this is the poll deadline).  Raise it for slow renders -- large
+    assemblies, high ambient-occlusion sample counts, or photon mapping.
     """
 
     output_dir: str = field(
         default_factory=lambda: os.getenv(
             "BRLCAD_RENDER_DIR", os.path.expanduser("~/brlcad_renders")
         )
+    )
+    timeout: float = field(
+        default_factory=lambda: float(os.getenv("BRLCAD_RENDER_TIMEOUT", "1800"))
     )
 
 

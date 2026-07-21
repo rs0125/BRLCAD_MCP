@@ -192,7 +192,8 @@ def _ged_rt_and_wait(opts, png):
     resp = send_command(f"rt {opts} -o {png}")
     if is_error_response(resp):
         return f"Error: ged_rt failed: {parse_response(resp)}"
-    deadline = time.time() + 600
+    limit = settings.render.timeout
+    deadline = time.time() + limit
     while time.time() < deadline:
         try:
             if os.path.getsize(png) >= 12:
@@ -203,7 +204,11 @@ def _ged_rt_and_wait(opts, png):
         except OSError:
             pass  # not created yet, or mid-write
         time.sleep(0.1)
-    return "Error: ged_rt render timed out (no complete PNG produced)."
+    # rt is a detached process, so it keeps running and will finish the PNG
+    # after we return -- we just stop waiting for it here.
+    return (f"Error: ged_rt render did not finish within {limit:g}s. It may "
+            f"still complete in the background; raise BRLCAD_RENDER_TIMEOUT for "
+            f"slow renders (large models, high ambSamples, photon mapping).")
 
 
 def _draw_objects(obj):
@@ -298,6 +303,50 @@ def _render_studio_via_ged_rt(obj, az, el, size, amb, ambient_samples,
         _remove_lights(lights)
 
 
+_LIGHTING_MODES = ("studio", "model", "ambient")
+
+
+def _auto_ambient(lighting):
+    """Default rt -A ambient level per mode (rigs want less, plain wants more)."""
+    return 1.0 if lighting in ("studio", "model") else 1.2
+
+
+def _dispatch_render(obj, az, el, size, amb, ambient_samples, quality,
+                     lighting, png):
+    """Route one render to the right ged_rt helper.  Returns None or an error."""
+    if lighting == "ambient":
+        return _render_via_ged_rt(
+            obj, az, el, size, amb, ambient_samples, quality, png)
+    if lighting in ("studio", "model"):
+        return _render_studio_via_ged_rt(
+            obj, az, el, size, amb, ambient_samples, quality, lighting, png)
+    return (f"Error: unknown lighting mode '{lighting}'. "
+            f"Use 'ambient', 'studio', or 'model'.")
+
+
+def _parse_variants(variants: str):
+    """Parse 'view:lighting,view:lighting,...' into (view, lighting) pairs.
+
+    Returns (pairs, errors); unknown views/lightings are reported, not rendered.
+    """
+    pairs, errors = [], []
+    for tok in variants.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        if ":" not in tok:
+            errors.append(f"'{tok}' is not 'view:lighting'")
+            continue
+        view, lighting = (p.strip() for p in tok.split(":", 1))
+        if view not in _VIEWS:
+            errors.append(f"unknown view '{view}' in '{tok}'")
+        elif lighting not in _LIGHTING_MODES:
+            errors.append(f"unknown lighting '{lighting}' in '{tok}'")
+        else:
+            pairs.append((view, lighting))
+    return pairs, errors
+
+
 @mcp.tool()
 def render_model(
     obj: str = Field(
@@ -360,8 +409,7 @@ def render_model(
     if elevation is not None:
         el = elevation
 
-    amb = ambient if ambient is not None else (
-        1.0 if lighting in ("studio", "model") else 1.2)
+    amb = ambient if ambient is not None else _auto_ambient(lighting)
     out_dir = settings.render.output_dir
     os.makedirs(out_dir, exist_ok=True)
     stem = (f"{obj.split()[0].strip('/').replace('/', '_')}_"
@@ -372,22 +420,98 @@ def render_model(
     # db -- no db path, no `opendb` (which sidesteps the MGED opendb crash).  rt
     # writes the PNG directly (the .png extension selects the format), so there
     # is no .pix intermediate and no pix-png subprocess.
-    if lighting == "ambient":
-        err = _render_via_ged_rt(
-            obj, az, el, size, amb, ambient_samples, quality, png)
-        detail = "ambient + occlusion (via ged_rt over the socket)"
-    elif lighting in ("studio", "model"):
-        err = _render_studio_via_ged_rt(
-            obj, az, el, size, amb, ambient_samples, quality, lighting, png)
-        kind = "camera-relative" if lighting == "studio" else "world-fixed"
-        detail = f"three-point rig ({kind}), via ged_rt over the socket"
-    else:
-        return (f"Error: unknown lighting mode '{lighting}'. "
-                f"Use 'ambient', 'studio', or 'model'.")
+    err = _dispatch_render(
+        obj, az, el, size, amb, ambient_samples, quality, lighting, png)
     if err:
         return err
+    if lighting == "ambient":
+        detail = "ambient + occlusion (via ged_rt over the socket)"
+    else:
+        kind = "camera-relative" if lighting == "studio" else "world-fixed"
+        detail = f"three-point rig ({kind}), via ged_rt over the socket"
 
     return (f"Rendered '{obj}' -> {png}\n"
             f"  view={view} (az={az:g}, el={el:g}), {size}px, quality={quality}\n"
             f"  lighting={lighting} ({detail}), ambient={amb:g}, "
             f"ambSamples={ambient_samples}")
+
+
+@mcp.tool()
+def render_previews(
+    obj: str = Field(
+        ...,
+        description="Object/assembly to preview (e.g. 'tank', 'havoc'). Space-"
+        "separate to render several top objects together.",
+    ),
+    variants: str = Field(
+        default="iso:studio,iso:model,iso:ambient",
+        description="Comma-separated 'view:lighting' pairs, one per variant, "
+        "e.g. 'iso:studio,iso:model,front:studio'. Each becomes a labelled "
+        "stamp (A, B, C ...). view is a preset (iso, iso2, front, back, side, "
+        "top ...); lighting is studio, model, or ambient.",
+    ),
+    size: int = Field(
+        default=192,
+        description="Stamp resolution in pixels. Keep small (~192) for the first "
+        "layout round; bump (~400) for the AO round.",
+    ),
+    ambient_samples: int = Field(
+        default=0,
+        description="Ambient-occlusion samples. 0 for the first cheap layout "
+        "round; ~64 for the second 'ambient + AO' round.",
+    ),
+    quality: str = Field(
+        default="draft",
+        description="'draft' (fast, no anti-aliasing) for stamps; 'clean' only "
+        "near-final.",
+    ),
+) -> str:
+    """Render a batch of labelled preview stamps into a timestamped folder.
+
+    This is the CHEAP, EARLY stage of a beauty render: several small draft
+    stamps so the user can compare layout and lighting BEFORE committing to a
+    slow full render.  Each 'view:lighting' variant becomes a labelled image
+    (A, B, C ...) saved as '<label>_<view>_<lighting>.png' in a fresh
+    timestamped subfolder of the render directory (so successive generations
+    stay separate).  Returns the folder path and a legend mapping each label to
+    its settings -- show that to the user and ask which labels look right.  Do
+    the AO/quality escalation and the final full render in later calls (see the
+    staged beauty-render recipe).
+    """
+    pairs, errors = _parse_variants(variants)
+    if not pairs:
+        return ("No valid variants to render. Use 'view:lighting' pairs like "
+                "'iso:studio,front:model'. " + " ".join(errors))
+    if len(pairs) > 26:
+        errors.append(f"capped at 26 variants (labels A-Z); dropped {len(pairs) - 26}")
+        pairs = pairs[:26]
+
+    out_dir = settings.render.output_dir
+    folder = os.path.join(out_dir, "previews_" + time.strftime("%Y%m%d_%H%M%S"))
+    os.makedirs(folder, exist_ok=True)
+
+    legend, failures = [], []
+    for i, (view, lighting) in enumerate(pairs):
+        label = chr(ord("A") + i)
+        az, el = _VIEWS[view]
+        png = os.path.join(folder, f"{label}_{view}_{lighting}.png")
+        err = _dispatch_render(
+            obj, az, el, size, _auto_ambient(lighting), ambient_samples,
+            quality, lighting, png)
+        if err:
+            failures.append(f"  {label} ({view}/{lighting}): {err}")
+        else:
+            legend.append(f"  {label} = {view} / {lighting}")
+
+    lines = [f"Rendered {len(legend)} preview stamp(s) into:\n  {folder}"]
+    if legend:
+        lines += ["Legend:", *legend]
+    if failures:
+        lines += ["Failed:", *failures]
+    if errors:
+        lines.append("Notes: " + "; ".join(errors))
+    lines.append(f"(size={size}px, quality={quality}, ambSamples={ambient_samples})")
+    lines.append("Ask the user which labels look right. Then re-render those "
+                 "with AO dialed in (larger size, ambient_samples ~64), and "
+                 "finally the full studio render via render_model.")
+    return "\n".join(lines)

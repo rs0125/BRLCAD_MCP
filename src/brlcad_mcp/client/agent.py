@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import mimetypes
 import os
+import re
+import subprocess
 import sys
+from pathlib import Path
 
-from langchain_core.messages import trim_messages
+from langchain_core.messages import HumanMessage, trim_messages
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
 from langchain_openai import ChatOpenAI
@@ -15,6 +20,121 @@ from langgraph.errors import GraphRecursionError
 from langgraph.prebuilt import create_react_agent
 
 from brlcad_mcp.config import settings
+
+# Image extensions we accept for /image; the model (gpt-4o) is multimodal, so an
+# attached image travels to it as an OpenAI image_url part (a base64 data URI).
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+
+_HELP = """Commands:
+  /image <path> [more paths] [prompt]  attach image file(s) and send a message
+  /paste [prompt]                      attach an image from the clipboard
+  /help                                show this help
+  exit | quit                          leave
+Drag-and-drop a file into the terminal to paste its path after /image.
+Anything else is sent to the agent as a normal message."""
+
+
+def _data_uri(data: bytes, mime: str) -> str:
+    return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+
+
+def _image_part_from_file(path: Path) -> dict:
+    """Build an OpenAI multimodal image_url part from an image file."""
+    mime = mimetypes.guess_type(str(path))[0] or "image/png"
+    return {"type": "image_url",
+            "image_url": {"url": _data_uri(path.read_bytes(), mime)}}
+
+
+def _clipboard_image_part() -> dict | None:
+    """Best-effort grab of an image from the clipboard (Wayland then X11).
+
+    Returns an image_url part, or None if no image / no clipboard tool.
+    """
+    for cmd in (["wl-paste", "--type", "image/png"],
+                ["xclip", "-selection", "clipboard", "-t", "image/png", "-o"]):
+        try:
+            out = subprocess.run(cmd, capture_output=True, timeout=5)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+        if out.returncode == 0 and out.stdout:
+            return {"type": "image_url",
+                    "image_url": {"url": _data_uri(out.stdout, "image/png")}}
+    return None
+
+
+def _build_message(text: str):
+    """Turn a line of REPL input into an agent message.
+
+    ``/image PATH [PATH...] [prompt]`` attaches one or more image files;
+    ``/paste [prompt]`` grabs an image from the clipboard.  Anything else is a
+    plain text turn.  Returns a ``HumanMessage`` (multimodal) or a
+    ``("user", text)`` tuple, or raises ``ValueError`` with a user-facing
+    message when an image command has nothing usable.
+    """
+    if text.startswith("/image"):
+        tokens = text[len("/image"):].split()
+        images: list[Path] = []
+        rest: list[str] = []
+        for i, tok in enumerate(tokens):
+            p = Path(tok.strip("\"'")).expanduser()
+            if p.suffix.lower() in _IMAGE_EXTS and p.is_file():
+                images.append(p)
+            else:
+                rest = tokens[i:]
+                break
+        if not images:
+            raise ValueError(
+                "Usage: /image <path> [more paths] [prompt]. No readable image "
+                "file found (paths must come first; supported: "
+                f"{', '.join(sorted(_IMAGE_EXTS))}).")
+        prompt = " ".join(rest).strip() or "Here is a reference image."
+        parts = [{"type": "text", "text": prompt}]
+        parts += [_image_part_from_file(p) for p in images]
+        print(f"  (attached {len(images)} image(s): "
+              f"{', '.join(p.name for p in images)})")
+        return HumanMessage(content=parts)
+
+    if text.startswith("/paste"):
+        prompt = text[len("/paste"):].strip() or "Here is a reference image."
+        part = _clipboard_image_part()
+        if part is None:
+            raise ValueError(
+                "No image on the clipboard (needs wl-paste or xclip, and an "
+                "image copied). Use /image <path> instead.")
+        print("  (attached image from clipboard)")
+        return HumanMessage(content=[{"type": "text", "text": prompt}, part])
+
+    return ("user", text)
+
+
+# Tools whose renders we feed back to the model (as a USER message -- OpenAI
+# rejects images in a tool-role message, so the tool returns paths and the
+# client re-attaches the images here) so it can visually self-check its work.
+_RENDER_FEEDBACK_TOOLS = {"build_from_spec"}
+# Cap the automatic compare/rebuild rounds per user request so it can't loop.
+MAX_AUTO_ROUNDS = 3
+
+
+def _extract_pngs(text: str) -> list[str]:
+    """Absolute .png paths mentioned in a tool result that exist on disk."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in re.findall(r"/[^\s'\"]+\.png", text):
+        if m not in seen and os.path.isfile(m):
+            seen.add(m)
+            out.append(m)
+    return out
+
+
+def _compare_followup(pngs: list[str]) -> HumanMessage:
+    """A user-role message that shows renders back to the model to compare."""
+    parts = [{"type": "text", "text": (
+        "Here are the check renders you just produced (attached). Compare them "
+        "to the reference image. If the model is wrong -- orientation, "
+        "proportions, or a missing / misplaced feature -- call build_from_spec "
+        "again with a corrected spec. If it looks right, say so and stop.")}]
+    parts += [_image_part_from_file(Path(p)) for p in pngs]
+    return HumanMessage(content=parts)
 
 # Sliding context window: the agent is shown at most this many of the most
 # recent messages on each turn (a turn is a user message plus the assistant
@@ -131,14 +251,64 @@ BoT mesh inside the database (verify with ``l <name>.bot``).  Large models
 can take ~30s; that is normal.  Do NOT use ``keep`` — it exports objects to
 a separate .g file and does not create a mesh.
 
-**Render to an image**: use the ``render_model`` tool — do NOT hand-run ``rt``.
-It renders the model the listener already has open (no file path needed),
-handles drawing, view, lighting and PNG output, and returns the image path.
-Pass ``obj`` plus a ``view`` preset (or ``azimuth``/``elevation``) and, if the
-user wants it, a ``lighting`` mode (``studio`` default, ``model``, ``ambient``).
-After completing a visual change (color, move, new geometry), offer the user a
-render so they can verify the result with their own eyes — attribute output
-alone can be misleading.
+**Rendering — STAMP FIRST, then confirm, then the full render.**  Do NOT go
+straight to a full/final render.  Rendering is cheap-to-expensive and the user
+approves before the slow final:
+1. STAMP: render a small, fast preview first.
+   - Single requested view: call ``render_model`` at small size (~192),
+     ``quality=draft``, ``ambient_samples=0``.
+   - "Make it look great" or several options: call ``render_previews`` with a
+     few ``view:lighting`` variants (small / draft / no AO); report the folder
+     and the A/B/C legend.
+   Then STOP and reply with the image path(s), asking the user to confirm the
+   framing / lighting (or pick a label).  Do NOT render the final in the same
+   turn — wait for their answer.
+2. (multi-option only) AO ROUND: on the labels the user picked, call
+   ``render_previews`` again at a larger size (~400) with ``ambient_samples``
+   ~64 (ambient + AO dialed in).  Stop and ask them to confirm.
+3. FINAL: once the user approves, call ``render_model`` at the requested size
+   (default 800) with ``quality=clean`` for the finished render.
+EXCEPTION — render directly: if the user explicitly asks to skip the preview
+("render directly", "just render it", "quick render", "no preview"), skip the
+stamp and call ``render_model`` at full quality straightaway.
+Always use ``render_model`` / ``render_previews`` for images — never hand-run
+``rt``; they need no file path.  After a visual change (color, move, new
+geometry), proactively offer a render so the user can verify with their own
+eyes — attribute output alone can be misleading.
+
+**Model something from a reference image**: when the user attaches an image
+(e.g. front / side views of a real object) and asks you to build it in BRL-CAD,
+work in explicit stages — do NOT start creating geometry blind:
+1. ESTIMATE (fix the scale FIRST): study the image and produce a STRUCTURED,
+   dimensioned spec BEFORE building — overall bounding box in mm, each feature
+   (name, size, position), wall thickness, and a proposed CSG decomposition.
+   For SCALE:
+   - If it is a recognizable object (an iPhone, a standard bottle, a Lego brick
+     …), use its real known dimensions from your own knowledge and say which
+     you assumed.
+   - Otherwise ask the user for ONE real dimension (e.g. overall height) and
+     derive the rest from the image's proportions.
+   Present the spec as plain text and ask the user to confirm or correct the
+   numbers.  Build NOTHING until they approve.
+2. BUILD + CHECK via the ``build_from_spec`` tool.  Turn the approved spec into
+   its JSON schema (box / cylinder / sphere parts, unioned or subtracted into one
+   region; first part must be ``add``; all mm) and call the tool.  It builds the
+   CSG deterministically AND renders the requested check views in one step, so
+   you do not create geometry by hand for this.  Model a hollow cover by adding
+   the outer solid then SUBTRACTING a slightly smaller inner solid; subtract
+   boxes/cylinders for cutouts (camera, ports, buttons).
+3. COMPARE — YOU will see the renders.  Right after ``build_from_spec`` runs,
+   the check views are shown back to you as images (in a follow-up message).
+   Actually LOOK at them and compare to the reference image (still in context):
+   is the orientation right, are proportions and feature positions correct, is
+   anything missing?  Do NOT just hand the images to the user and ask — judge
+   them yourself first.
+4. ADJUST and ITERATE: if it is off, make CONCRETE changes to the spec (which
+   part, which dimension, by how much) and call ``build_from_spec`` again.  This
+   is a legitimate multi-step loop, so the STOP RULE does not force you to stop
+   after one build — keep going.  Iterate up to ~3 rounds on your own judgement,
+   THEN show the user the result and ask if it is good enough.  Set expectations
+   plainly: this yields a recognizable approximation, not an exact replica.
 
 **Move / mirror a part non-interactively**:
 1. FIRST run ``units mm`` — this is mandatory before any coordinate work.
@@ -224,7 +394,10 @@ edit and no move.  This overrides the dedicated-tools-first rule.
 
 1. **Dedicated tools first** — create_sphere, create_box, create_cylinder,
    boolean_combination (they handle draw/autoview automatically); render_model
-   for images; model_health_report to audit a model; separate_overlap /
+   for a single image and render_previews for a batch of labelled preview stamps
+   (see the beauty-render recipe); build_from_spec to build+render a parametric
+   model from a JSON spec (the deterministic build stage of modelling from a
+   reference image); model_health_report to audit a model; separate_overlap /
    resolve_overlaps for interference fixes (but see the overlap rules above —
    ask before resolving).
 2. **Discovery workflow** — list_commands → get_command_help →
@@ -363,21 +536,46 @@ async def run_agent() -> None:
         print(" BRL-CAD Terminal Agent Active. Type 'exit' to quit.")
         print("=================================================")
 
-        while True:
-            try:
-                user_input = input("\nYou: ")
-            except (EOFError, KeyboardInterrupt):
-                print("\nGoodbye!")
-                break
+        print("Type /help for commands (including /image to attach a picture).")
 
-            if user_input.strip().lower() in {"exit", "quit"}:
-                break
+        follow_up: HumanMessage | None = None
+        auto_rounds = 0
+
+        while True:
+            if follow_up is not None:
+                message = follow_up
+                follow_up = None
+                print("\n  [auto] showing the render(s) back to the agent to "
+                      "compare with the reference...")
+            else:
+                try:
+                    user_input = input("\nYou: ")
+                except (EOFError, KeyboardInterrupt):
+                    print("\nGoodbye!")
+                    break
+
+                stripped = user_input.strip()
+                if stripped.lower() in {"exit", "quit"}:
+                    break
+                if stripped.lower() in {"/help", "help"}:
+                    print(_HELP)
+                    continue
+                if not stripped:
+                    continue
+
+                try:
+                    message = _build_message(stripped)
+                except ValueError as exc:
+                    print(f"  {exc}")
+                    continue
+                auto_rounds = 0  # a real user turn resets the auto-compare budget
 
             print("AI is thinking...\n")
             final_answer = ""
+            produced_pngs: list[str] = []
             try:
                 async for event in agent.astream_events(
-                    {"messages": [("user", user_input)]},
+                    {"messages": [message]},
                     version="v2",
                     config=config,
                 ):
@@ -397,10 +595,12 @@ async def run_agent() -> None:
                     # ── Tool returned a result ──
                     elif kind == "on_tool_end":
                         tool_output = event.get("data", {}).get("output", "")
-                        output_str = str(tool_output)
-                        if len(output_str) > 300:
-                            output_str = output_str[:300] + "…"
-                        print(f"    ✓ Result: {output_str}\n")
+                        full = str(tool_output)
+                        preview = full[:300] + "…" if len(full) > 300 else full
+                        print(f"    ✓ Result: {preview}\n")
+                        # Collect renders to feed back for visual self-check.
+                        if event.get("name") in _RENDER_FEEDBACK_TOOLS:
+                            produced_pngs.extend(_extract_pngs(full))
 
                     # ── LLM produced a final text reply (no tool calls) ──
                     elif kind == "on_chat_model_end":
@@ -426,6 +626,13 @@ async def run_agent() -> None:
                 print(f"AI: {final_answer}")
             else:
                 print("AI: (no response)")
+
+            # If a build produced renders, feed them back (as a user message, so
+            # OpenAI accepts the images) for a self-check round -- bounded so it
+            # cannot loop forever.
+            if produced_pngs and auto_rounds < MAX_AUTO_ROUNDS:
+                follow_up = _compare_followup(produced_pngs)
+                auto_rounds += 1
 
 
 def main() -> None:

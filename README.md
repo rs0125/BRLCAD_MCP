@@ -103,6 +103,7 @@ All configuration is managed through a `.env` file in the project root. A templa
 | `BRLCAD_TIMEOUT`      | Socket timeout in seconds                    | `5.0`         |
 | `BRLCAD_BUFFER_SIZE`  | Receive buffer size in bytes                 | `4096`        |
 | `BRLCAD_RENDER_DIR`   | Directory where rendered images are written  | `~/brlcad_renders` |
+| `BRLCAD_RENDER_TIMEOUT` | Seconds to wait for one render (raise for slow renders) | `1800` |
 | `MCP_TRANSPORT`       | MCP transport type                           | `stdio`       |
 
 **Important:** Never commit your `.env` file. It is already included in `.gitignore`.
