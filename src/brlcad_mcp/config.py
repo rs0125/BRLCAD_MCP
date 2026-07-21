@@ -56,14 +56,13 @@ class ServerConfig:
 
 @dataclass(frozen=True)
 class RenderConfig:
-    """Settings for the headless rt renderer.
+    """Settings for the headless renderer.
 
-    Rendering shells out to BRL-CAD's ``rt`` and ``pix-png``, so the server
-    must run where those tools are available.  ``bin_dir`` points at the
-    BRL-CAD ``bin`` directory when they are not already on ``PATH``.
+    Rendering runs entirely over the socket via the ged ``rt`` command (which
+    writes PNG directly), so no BRL-CAD binaries or PATH are needed.  Only the
+    output directory is configurable.
     """
 
-    bin_dir: str = field(default_factory=lambda: os.getenv("BRLCAD_BIN", ""))
     output_dir: str = field(
         default_factory=lambda: os.getenv(
             "BRLCAD_RENDER_DIR", os.path.expanduser("~/brlcad_renders")

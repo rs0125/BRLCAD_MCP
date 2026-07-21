@@ -22,18 +22,18 @@ The rig modes build their light regions on the live database over the socket,
 read the current view (size/eye_pt/center) to place the rig, draw the invisible
 lights, render, then remove the temp lights afterwards.
 
-The only subprocess left is ``pix-png`` (rt writes a ``.pix`` that we convert to
-PNG), so the server must run where BRL-CAD's tools are on PATH, or set
-``BRLCAD_BIN`` to their directory.
+rt writes the PNG directly (the ``.png`` output extension selects the format),
+so there is no ``.pix`` intermediate, no ``pix-png`` step, and no subprocess at
+all -- the whole render happens in the listener process over the socket.  We
+poll the output file for the PNG end-of-stream marker to know when the async rt
+has finished.
 """
 
 from __future__ import annotations
 
 import math
 import os
-import subprocess
 import time
-from pathlib import Path
 
 from pydantic import Field
 
@@ -97,39 +97,6 @@ _MODEL_RIG = [
 ]
 _LIGHT_RADIUS_FRAC = 0.03  # light sphere radius as a fraction of view size
 _LIGHT_PREFIX = "_rndrlight_"
-
-
-def _bin(name: str) -> str:
-    """Resolve a BRL-CAD tool, honoring BRLCAD_BIN when it is set."""
-    d = settings.render.bin_dir
-    return str(Path(d) / name) if d else name
-
-
-def _subprocess_env() -> dict:
-    """Environment for the rt / pix-png subprocesses.
-
-    On a normal BRL-CAD install the binaries find their shared libraries via
-    RPATH or the system linker, so nothing is needed here.  When running against
-    a *build tree* (BRLCAD_BIN pointed at ``build/bin``), the libraries live in a
-    sibling ``lib/`` that is not on the system linker path, so we prepend it to
-    the loader search path.
-
-    This stays release-safe: it derives the lib dir from BRLCAD_BIN rather than
-    hardcoding one, only adds it when the directory actually exists, and
-    *prepends* (never replaces) so any existing value is preserved.  With no
-    BRLCAD_BIN set -- the usual case for an installed release where rt is on
-    PATH -- it adds nothing and rt uses its own RPATH.
-    """
-    env = dict(os.environ)
-    bin_dir = settings.render.bin_dir
-    if bin_dir:
-        lib = os.path.abspath(os.path.join(bin_dir, os.pardir, "lib"))
-        if os.path.isdir(lib):
-            # LD_LIBRARY_PATH on Linux, DYLD_LIBRARY_PATH on macOS
-            for var in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
-                cur = env.get(var, "")
-                env[var] = lib + (os.pathsep + cur if cur else "")
-    return env
 
 
 def _rig_positions(eye: str, center, size: str):
@@ -207,23 +174,36 @@ def _rt_opts(size, amb, ambient_samples, quality):
     return opts
 
 
-def _ged_rt_and_wait(opts, pix, size):
-    """Fire `rt` over the socket and wait for the .pix to finish.
+# Every PNG stream ends with a 12-byte IEND chunk; its last 8 bytes are the
+# literal "IEND" tag plus its fixed CRC.  Seeing this at EOF means rt has
+# finished writing a complete image (rt writes PNG directly when -o ends .png).
+_PNG_EOF = b"IEND\xaeB`\x82"
 
-    ged_rt is async -- it launches rt and returns immediately -- so we poll for
-    the file to reach its full size (W*H*3 bytes).  Returns None on success or an
-    error string.
+
+def _ged_rt_and_wait(opts, png):
+    """Fire `rt` over the socket and wait for the PNG to finish.
+
+    rt writes PNG directly (the `-o *.png` extension selects the format), so
+    there is no separate pix-png step.  ged_rt is async -- it launches rt and
+    returns immediately -- and rt writes the file incrementally, so we poll until
+    the file ends with the PNG IEND marker (a complete stream).  Returns None on
+    success or an error string.
     """
-    resp = send_command(f"rt {opts} -o {pix}")
+    resp = send_command(f"rt {opts} -o {png}")
     if is_error_response(resp):
         return f"Error: ged_rt failed: {parse_response(resp)}"
-    expected = size * size * 3
     deadline = time.time() + 600
     while time.time() < deadline:
-        if os.path.exists(pix) and os.path.getsize(pix) >= expected:
-            return None
+        try:
+            if os.path.getsize(png) >= 12:
+                with open(png, "rb") as fh:
+                    fh.seek(-8, os.SEEK_END)
+                    if fh.read(8) == _PNG_EOF:
+                        return None
+        except OSError:
+            pass  # not created yet, or mid-write
         time.sleep(0.1)
-    return "Error: ged_rt render timed out (no complete .pix produced)."
+    return "Error: ged_rt render timed out (no complete PNG produced)."
 
 
 def _draw_objects(obj):
@@ -258,7 +238,7 @@ def _view_params():
     return vsize, eye, center
 
 
-def _render_via_ged_rt(obj, az, el, size, amb, ambient_samples, quality, pix):
+def _render_via_ged_rt(obj, az, el, size, amb, ambient_samples, quality, png):
     """Ambient render over the socket with the ged `rt` command.
 
     ged_rt renders the listener's OWN open database (it uses gedp->dbip), so we
@@ -270,7 +250,7 @@ def _render_via_ged_rt(obj, az, el, size, amb, ambient_samples, quality, pix):
     (ae/autoview) -- visible in a live MGED.
     """
     try:
-        os.remove(pix)  # clear any stale file so the poll is meaningful
+        os.remove(png)  # clear any stale file so the poll is meaningful
     except OSError:
         pass
     err = _draw_objects(obj)
@@ -278,12 +258,11 @@ def _render_via_ged_rt(obj, az, el, size, amb, ambient_samples, quality, pix):
         return err
     send_command(f"ae {az:g} {el:g}")
     send_command("autoview")
-    return _ged_rt_and_wait(
-        _rt_opts(size, amb, ambient_samples, quality), pix, size)
+    return _ged_rt_and_wait(_rt_opts(size, amb, ambient_samples, quality), png)
 
 
 def _render_studio_via_ged_rt(obj, az, el, size, amb, ambient_samples,
-                              quality, lighting, pix):
+                              quality, lighting, png):
     """Studio/model render over the socket -- no db path.
 
     Same ged_rt idea as ambient, but we first build the three-point light rig on
@@ -293,7 +272,7 @@ def _render_studio_via_ged_rt(obj, az, el, size, amb, ambient_samples,
     is left as we found it apart from the object staying drawn.
     """
     try:
-        os.remove(pix)
+        os.remove(png)
     except OSError:
         pass
     err = _draw_objects(obj)
@@ -314,7 +293,7 @@ def _render_studio_via_ged_rt(obj, az, el, size, amb, ambient_samples,
         for n in lights:
             send_command(f"draw {n}.r")
         return _ged_rt_and_wait(
-            _rt_opts(size, amb, ambient_samples, quality), pix, size)
+            _rt_opts(size, amb, ambient_samples, quality), png)
     finally:
         _remove_lights(lights)
 
@@ -387,18 +366,19 @@ def render_model(
     os.makedirs(out_dir, exist_ok=True)
     stem = (f"{obj.split()[0].strip('/').replace('/', '_')}_"
             f"{view}_{int(az)}_{int(el)}_{lighting}")
-    pix = os.path.join(out_dir, stem + ".pix")
     png = os.path.join(out_dir, stem + ".png")
 
     # Everything renders over the socket via ged_rt on the listener's own open
-    # db -- no db path, no `opendb` (which sidesteps the MGED opendb crash).
+    # db -- no db path, no `opendb` (which sidesteps the MGED opendb crash).  rt
+    # writes the PNG directly (the .png extension selects the format), so there
+    # is no .pix intermediate and no pix-png subprocess.
     if lighting == "ambient":
         err = _render_via_ged_rt(
-            obj, az, el, size, amb, ambient_samples, quality, pix)
+            obj, az, el, size, amb, ambient_samples, quality, png)
         detail = "ambient + occlusion (via ged_rt over the socket)"
     elif lighting in ("studio", "model"):
         err = _render_studio_via_ged_rt(
-            obj, az, el, size, amb, ambient_samples, quality, lighting, pix)
+            obj, az, el, size, amb, ambient_samples, quality, lighting, png)
         kind = "camera-relative" if lighting == "studio" else "world-fixed"
         detail = f"three-point rig ({kind}), via ged_rt over the socket"
     else:
@@ -406,23 +386,6 @@ def render_model(
                 f"Use 'ambient', 'studio', or 'model'.")
     if err:
         return err
-
-    try:
-        with open(png, "wb") as fh:
-            conv = subprocess.run(
-                [_bin("pix-png"), "-s", str(size), pix],
-                stdout=fh, stderr=subprocess.PIPE, timeout=180,
-                env=_subprocess_env(),
-            )
-    except FileNotFoundError:
-        return f"Error: 'pix-png' not found. Raw render is at {pix}."
-    try:
-        os.remove(pix)
-    except OSError:
-        pass
-    if not os.path.exists(png) or os.path.getsize(png) == 0:
-        return (f"Error: pix-png conversion failed.\n"
-                f"{conv.stderr.decode(errors='ignore')[-300:]}")
 
     return (f"Rendered '{obj}' -> {png}\n"
             f"  view={view} (az={az:g}, el={el:g}), {size}px, quality={quality}\n"

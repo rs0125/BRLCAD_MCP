@@ -102,7 +102,6 @@ All configuration is managed through a `.env` file in the project root. A templa
 | `BRLCAD_PORT`         | Port the listener (`mcp_listen`) is bound to | `5555`        |
 | `BRLCAD_TIMEOUT`      | Socket timeout in seconds                    | `5.0`         |
 | `BRLCAD_BUFFER_SIZE`  | Receive buffer size in bytes                 | `4096`        |
-| `BRLCAD_BIN`          | Directory with BRL-CAD binaries (`pix-png`); needed for rendering | (system `PATH`) |
 | `BRLCAD_RENDER_DIR`   | Directory where rendered images are written  | `~/brlcad_renders` |
 | `MCP_TRANSPORT`       | MCP transport type                           | `stdio`       |
 
@@ -279,7 +278,7 @@ Sweep an assembly for overlaps and resolve each by minimal sliding, re-running `
 
 #### `render_model`
 
-Render the model the listener currently has open to a PNG, over the socket via the ged `rt` command (no `.g` path needed, no `opendb`). View presets (iso, front, side, top, back, and rear-quarter isometrics) or a custom azimuth/elevation, at three lighting levels: `studio` (default, camera-relative three-point rig — every angle lit the same), `model` (world-fixed rig — fixed-sun look), and `ambient` (evenly-lit, no rig). Requires `pix-png` on `PATH` or `BRLCAD_BIN` set.
+Render the model the listener currently has open to a PNG, over the socket via the ged `rt` command (no `.g` path needed, no `opendb`). View presets (iso, front, side, top, back, and rear-quarter isometrics) or a custom azimuth/elevation, at three lighting levels: `studio` (default, camera-relative three-point rig — every angle lit the same), `model` (world-fixed rig — fixed-sun look), and `ambient` (evenly-lit, no rig). Renders entirely over the socket — `rt` writes the PNG directly, so no BRL-CAD binaries or `PATH` setup are required.
 
 ---
 
