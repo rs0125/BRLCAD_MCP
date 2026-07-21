@@ -131,12 +131,14 @@ BoT mesh inside the database (verify with ``l <name>.bot``).  Large models
 can take ~30s; that is normal.  Do NOT use ``keep`` — it exports objects to
 a separate .g file and does not create a mesh.
 
-**Render to an image**: ``rt`` renders the DISPLAY LIST, so draw first:
-``draw <obj>``, then ``autoview``, then ``rt -o /absolute/path.png -s <px>``.
-The image file is written asynchronously — it may appear a few seconds
-after the command returns.  After completing a visual change (color, move,
-new geometry), offer the user a render so they can verify the result with
-their own eyes — attribute output alone can be misleading.
+**Render to an image**: use the ``render_model`` tool — do NOT hand-run ``rt``.
+It renders the model the listener already has open (no file path needed),
+handles drawing, view, lighting and PNG output, and returns the image path.
+Pass ``obj`` plus a ``view`` preset (or ``azimuth``/``elevation``) and, if the
+user wants it, a ``lighting`` mode (``studio`` default, ``model``, ``ambient``).
+After completing a visual change (color, move, new geometry), offer the user a
+render so they can verify the result with their own eyes — attribute output
+alone can be misleading.
 
 **Move / mirror a part non-interactively**:
 1. FIRST run ``units mm`` — this is mandatory before any coordinate work.
@@ -178,6 +180,8 @@ default overlap tolerance is 0, so the list mixes genuine overlaps
 (millimetres deep) with coincident-surface noise (sub-0.01 mm); triage by
 depth — treat sub-0.01 mm hits as noise unless told otherwise, deepest
 first.  For finer detection re-run with a smaller ``-g`` (e.g. ``-g 0.5``).
+Or call the ``model_health_report`` tool for a full audit — it runs this same
+overlap check plus BRL-CAD's lint validators and returns one grouped report.
 
 **Resolve an overlap — ASK THE USER FIRST**: there are two standard fixes,
 and the choice belongs to the user, not you:
@@ -189,22 +193,25 @@ and the choice belongs to the user, not you:
    invent a new region name like ``regionA.r`` — those nest/duplicate
    instead of trimming.  gqa reports region names, and ``r`` accepts a
    region as the operand (you'll see "Note: X is a region" — that's fine).
-2. *Move* (parts separated): relocate one part so they no longer intersect
-   (follow the Move recipe above — ``units mm`` first).  DIRECTION: gqa does
-   not give a separation vector, so move along the line joining the two
-   parts' centres — take ``bb -m`` of each region, subtract to get the
-   direction from the other part to the one you're moving, and shift the
-   moved part that way by the penetration depth PLUS a small clearance
-   (~1 mm).  Moving by exactly the depth leaves the surfaces touching, which
-   still counts as an overlap.  If the centres nearly coincide (fully nested
-   parts), the direction is ambiguous — ask the user which way to move.
-MOVE THE RIGHT LEVEL: gqa reports overlaps at leaf-region granularity, e.g.
-``/havoc/weapons/ft_weapons/30mm_autocannon/30mm_barrel/r.b``.  Do NOT move
-that leaf — ``otranslate`` moves an object and its whole subtree, so moving a
-leaf tears it out of its assembly.  Identify the meaningful PART from the
-path (the named subassembly the user means, e.g. ``30mm_autocannon``) and
-move THAT.  The separate_overlap tool refuses bare solids and reports a
-part's parents to help you check you're at the right level.
+2. *Move* (parts separated): use the dedicated tools — do NOT hand-roll the
+   move with ``otranslate``.  ``separate_overlap`` slides ONE overlapping pair
+   apart by the minimal clearance (it binary-searches the distance with gqa as
+   a yes/no oracle and re-verifies afterwards); ``resolve_overlaps`` sweeps a
+   whole assembly and resolves each pair the same way.  These are more robust
+   than a hand-computed move, so prefer them.
+   MOVE THE RIGHT LEVEL: gqa reports overlaps at leaf-region granularity, e.g.
+   ``/havoc/weapons/ft_weapons/30mm_autocannon/30mm_barrel/r.b``.  Pass the
+   meaningful PART (the named subassembly the user means, e.g.
+   ``30mm_autocannon``), NOT the leaf — moving a leaf tears it out of its
+   assembly.  ``separate_overlap`` refuses bare solids and reports a part's
+   parents to help you pick the right level.  If the two parts are fully
+   nested (centres nearly coincide) the exit direction is ambiguous — ask the
+   user which way to move.
+   FALLBACK, only if the tools cannot handle a case: move by hand along the
+   line joining the two parts' centres — ``units mm`` first, ``bb -m`` each
+   region, subtract for the direction, then ``otranslate`` by the penetration
+   depth PLUS ~1 mm clearance (moving by exactly the depth leaves the surfaces
+   touching, which still counts as an overlap).
 
 After either fix, re-run ``gqa`` on the pair to confirm it is gone.
 A bare instruction like "fix it" / "resolve it" does NOT count as choosing —
@@ -216,7 +223,10 @@ edit and no move.  This overrides the dedicated-tools-first rule.
 ## Tool strategy
 
 1. **Dedicated tools first** — create_sphere, create_box, create_cylinder,
-   boolean_combination.  They handle draw/autoview automatically.
+   boolean_combination (they handle draw/autoview automatically); render_model
+   for images; model_health_report to audit a model; separate_overlap /
+   resolve_overlaps for interference fixes (but see the overlap rules above —
+   ask before resolving).
 2. **Discovery workflow** — list_commands → get_command_help →
    execute_command.  Set ``auto_draw=true`` + ``object_name`` when the
    command creates or modifies visible geometry.
@@ -240,7 +250,6 @@ Prefer ``db adjust`` (stateless) over ``sed``/``oscale``/``accept``:
 |---|---|
 | Scale a sphere | ``db adjust <name> r <new_radius>`` |
 | Move a primitive | ``db adjust <name> V {<x> <y> <z>}`` |
-| Create a database | ``opendb <name>.g y`` |
 | Delete one object | ``killall <name>`` |
 | Delete many | resolve names via ``search`` first, then ``kill a b c`` |
 
