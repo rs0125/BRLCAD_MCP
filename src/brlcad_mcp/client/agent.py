@@ -110,7 +110,7 @@ def _build_message(text: str):
 # Tools whose renders we feed back to the model (as a USER message -- OpenAI
 # rejects images in a tool-role message, so the tool returns paths and the
 # client re-attaches the images here) so it can visually self-check its work.
-_RENDER_FEEDBACK_TOOLS = {"build_from_spec"}
+_RENDER_FEEDBACK_TOOLS = {"build_from_spec", "edit_build", "undo_build"}
 # Cap the automatic compare/rebuild rounds per user request so it can't loop.
 MAX_AUTO_ROUNDS = 3
 
@@ -130,9 +130,16 @@ def _compare_followup(pngs: list[str]) -> HumanMessage:
     """A user-role message that shows renders back to the model to compare."""
     parts = [{"type": "text", "text": (
         "Here are the check renders you just produced (attached). Compare them "
-        "to the reference image. If the model is wrong -- orientation, "
-        "proportions, or a missing / misplaced feature -- call build_from_spec "
-        "again with a corrected spec. If it looks right, say so and stop.")}]
+        "to the reference CAREFULLY -- do not just say it looks right:\n"
+        "1. COUNT the repeated features (studs, holes, bolts, etc.) in the "
+        "render AND in the reference, and state both numbers explicitly. If "
+        "they differ, the model is wrong.\n"
+        "2. Sanity-check the count against dimensions (e.g. a 32 mm x 16 mm "
+        "brick at 8 mm spacing is 4x2 = 8 studs, not 6).\n"
+        "3. Check orientation, proportions, and each feature's position.\n"
+        "If anything is off, fix it with edit_build (small ops) -- or "
+        "build_from_spec only if the whole layout is wrong. If everything "
+        "matches, say so and stop.")}]
     parts += [_image_part_from_file(Path(p)) for p in pngs]
     return HumanMessage(content=parts)
 
@@ -303,12 +310,16 @@ work in explicit stages — do NOT start creating geometry blind:
    is the orientation right, are proportions and feature positions correct, is
    anything missing?  Do NOT just hand the images to the user and ask — judge
    them yourself first.
-4. ADJUST and ITERATE: if it is off, make CONCRETE changes to the spec (which
-   part, which dimension, by how much) and call ``build_from_spec`` again.  This
-   is a legitimate multi-step loop, so the STOP RULE does not force you to stop
-   after one build — keep going.  Iterate up to ~3 rounds on your own judgement,
-   THEN show the user the result and ask if it is good enough.  Set expectations
-   plainly: this yields a recognizable approximation, not an exact replica.
+4. ADJUST and ITERATE: to change a model that already exists, use
+   ``edit_build`` with a SMALL list of ops (move / update / add / remove a part)
+   — do NOT re-send the whole model through ``build_from_spec`` (that risks
+   dropping parts you did not mean to change).  ``edit_build`` loads the current
+   spec, applies just your ops, rebuilds and re-renders.  To revert a change,
+   call ``undo_build``; ``list_builds`` shows the saved versions.  This is a
+   legitimate multi-step loop, so the STOP RULE does not force you to stop after
+   one edit — iterate up to ~3 rounds on your own judgement, then show the user
+   and ask.  Set expectations plainly: a recognizable approximation, not an
+   exact replica.
 
 **Move / mirror a part non-interactively**:
 1. FIRST run ``units mm`` — this is mandatory before any coordinate work.
@@ -396,8 +407,9 @@ edit and no move.  This overrides the dedicated-tools-first rule.
    boolean_combination (they handle draw/autoview automatically); render_model
    for a single image and render_previews for a batch of labelled preview stamps
    (see the beauty-render recipe); build_from_spec to build+render a parametric
-   model from a JSON spec (the deterministic build stage of modelling from a
-   reference image); model_health_report to audit a model; separate_overlap /
+   model from a JSON spec, then edit_build / undo_build / list_builds to edit
+   and revert it incrementally (the deterministic build stage of modelling from
+   a reference image); model_health_report to audit a model; separate_overlap /
    resolve_overlaps for interference fixes (but see the overlap rules above —
    ask before resolving).
 2. **Discovery workflow** — list_commands → get_command_help →
@@ -475,15 +487,40 @@ If ``search`` returns nothing, there are no matches — report that honestly
 rather than claiming the operation succeeded.
 """
 
-def _build_model() -> ChatOpenAI:
-    """Instantiate the LLM backend."""
+def _is_reasoning_model(model_id: str) -> bool:
+    """True for GPT-5.x / Sol / Terra / Luna / o-series reasoning models.
+
+    These use ``reasoning_effort`` and reject a ``temperature`` argument, unlike
+    older chat models (gpt-4o, gpt-4.1) that take temperature.
+    """
+    m = model_id.lower()
+    return any(t in m for t in ("gpt-5", "sol", "terra", "luna",
+                                "o1", "o3", "o4"))
+
+
+def _model_kwargs(model_id: str, effort: str, temperature: float) -> dict:
+    """ChatOpenAI kwargs for the model family (pure, so it's testable).
+
+    Reasoning models (gpt-5.x / sol / terra / luna / o-series) reject
+    ``reasoning_effort`` alongside function tools on /v1/chat/completions unless
+    it is ``'none'`` -- and this agent always registers tools -- so we force
+    ``'none'`` for them (extended reasoning would need the Responses API, not
+    wired yet; the model's vision/capability is unaffected).  Legacy chat models
+    (gpt-4o, ...) take ``temperature`` instead and reject ``reasoning_effort``.
+    """
+    if effort or _is_reasoning_model(model_id):
+        return {"model": model_id, "reasoning_effort": "none"}
+    return {"model": model_id, "temperature": temperature}
+
+
+def _build_model():
+    """Instantiate the LLM backend, matching params to the model family."""
     if not settings.llm.api_key:
         print("ERROR: OPENAI_API_KEY environment variable is not set.")
         sys.exit(1)
-    return ChatOpenAI(
-        model=settings.llm.model,
-        temperature=settings.llm.temperature,
-    ).bind(parallel_tool_calls=False)
+    kwargs = _model_kwargs(settings.llm.model, settings.llm.reasoning_effort,
+                           settings.llm.temperature)
+    return ChatOpenAI(**kwargs).bind(parallel_tool_calls=False)
 
 
 async def run_agent() -> None:

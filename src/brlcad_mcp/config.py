@@ -31,16 +31,30 @@ class BRLCADConfig:
 
 @dataclass(frozen=True)
 class LLMConfig:
-    """Settings for the OpenAI / LLM backend."""
+    """Settings for the OpenAI / LLM backend.
+
+    ``model`` defaults to GPT-5.6 Sol.  Confirm the exact model id in your
+    OpenAI dashboard and override with OPENAI_MODEL if it differs.  Sol is a
+    reasoning-style model: it uses ``reasoning_effort`` and rejects a
+    ``temperature`` argument, so the client picks the right one automatically
+    (see agent._build_model).
+    """
 
     api_key: str = field(
         default_factory=lambda: os.getenv("OPENAI_API_KEY", "")
     )
     model: str = field(
-        default_factory=lambda: os.getenv("OPENAI_MODEL", "gpt-4o")
+        default_factory=lambda: os.getenv("OPENAI_MODEL", "gpt-5.6-sol")
     )
     temperature: float = field(
         default_factory=lambda: float(os.getenv("OPENAI_TEMPERATURE", "0"))
+    )
+    # Reserved for reasoning models.  NOTE: on /v1/chat/completions (what the
+    # client uses) reasoning models reject reasoning_effort together with
+    # function tools unless it is 'none', so the client forces 'none' regardless
+    # of this value.  Extended effort (high/max) would need the Responses API.
+    reasoning_effort: str = field(
+        default_factory=lambda: os.getenv("OPENAI_REASONING_EFFORT", "")
     )
 
 

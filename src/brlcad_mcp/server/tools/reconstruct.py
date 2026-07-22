@@ -159,6 +159,115 @@ def _render_checks(region: str, views: list[str], size: int, lighting: str):
     return folder, out
 
 
+# --- spec history (per region) -------------------------------------------
+# Every accepted build/edit saves its full spec as a new version, so a model is
+# an editable, revertable document -- not something you must fully re-specify.
+
+def _specs_root() -> str:
+    return os.path.join(settings.render.output_dir, "specs")
+
+
+def _name_dir(name: str) -> str:
+    return os.path.join(_specs_root(), name)
+
+
+def _versions(name: str) -> list[str]:
+    """Saved spec files for *name*, oldest first (v001.json, v002.json, ...)."""
+    d = _name_dir(name)
+    if not os.path.isdir(d):
+        return []
+    files = sorted(f for f in os.listdir(d)
+                   if f.startswith("v") and f.endswith(".json"))
+    return [os.path.join(d, f) for f in files]
+
+
+def _load_spec(path: str) -> dict:
+    with open(path) as fh:
+        return json.load(fh)
+
+
+def _latest_spec(name: str) -> dict | None:
+    v = _versions(name)
+    return _load_spec(v[-1]) if v else None
+
+
+def _save_spec(name: str, spec_dict: dict) -> str:
+    d = _name_dir(name)
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, f"v{len(_versions(name)) + 1:03d}.json")
+    with open(path, "w") as fh:
+        json.dump(spec_dict, fh, indent=2)
+    return path
+
+
+def _apply_edits(parts: list[dict], edits: list[dict]):
+    """Apply edit ops to a list of part dicts.  Returns (new_parts, errors).
+
+    Each edit's ``action`` is move / update / add / remove.  NOTE the action key
+    is ``action``, NOT ``op`` -- a part's ``op`` field is its boolean role
+    (add/subtract), so keeping the action under a separate key avoids clobbering
+    it.  Pure -- no I/O -- so it is easy to test.
+    """
+    parts = [dict(p) for p in parts]
+    by_name = {p.get("name"): p for p in parts}
+    errors: list[str] = []
+    for e in edits:
+        action = e.get("action")
+        if action == "add":
+            part = e.get("part")
+            if not isinstance(part, dict) or "name" not in part:
+                errors.append("add: needs a 'part' object with a name")
+            elif part["name"] in by_name:
+                errors.append(f"add: part '{part['name']}' already exists")
+            else:
+                parts.append(dict(part))
+                by_name[part["name"]] = parts[-1]
+        elif action == "remove":
+            nm = e.get("name")
+            if nm not in by_name:
+                errors.append(f"remove: no part '{nm}'")
+            else:
+                parts = [p for p in parts if p.get("name") != nm]
+                del by_name[nm]
+        elif action == "move":
+            p, delta = by_name.get(e.get("name")), e.get("delta")
+            if p is None:
+                errors.append(f"move: no part '{e.get('name')}'")
+            elif not (isinstance(delta, list) and len(delta) == 3):
+                errors.append(f"move: '{e.get('name')}' needs delta [dx,dy,dz]")
+            else:
+                c = p.get("center", [0, 0, 0])
+                p["center"] = [c[0] + delta[0], c[1] + delta[1], c[2] + delta[2]]
+        elif action == "update":
+            p = by_name.get(e.get("name"))
+            if p is None:
+                errors.append(f"update: no part '{e.get('name')}'")
+            else:
+                # 'op' here is the PART's boolean role (add/subtract), safe to
+                # set because the edit action lives under 'action'.
+                for k in ("center", "size", "height", "radius", "op", "shape"):
+                    if k in e:
+                        p[k] = e[k]
+        else:
+            errors.append(f"unknown action '{action}' (use move/update/add/remove)")
+    return parts, errors
+
+
+def _report(parsed: BuildSpec, folder: str, results, header: str) -> str:
+    lines = [f"{header} from {len(parsed.parts)} part(s):"]
+    for p in parsed.parts:
+        lines.append(f"  {'+' if p.op == 'add' else '-'} {p.name} ({p.shape})")
+    lines.append(f"Check renders in:\n  {folder}")
+    for view, res in results:
+        ok = isinstance(res, str) and res.endswith(".png") and os.path.exists(res)
+        lines.append(f"  {view}: {res}" if ok else f"  {view}: FAILED - {res}")
+    lines.append("These check renders will be shown back to you as images to "
+                 "compare with the reference. To change the model, use "
+                 "edit_build (a small list of ops) -- do NOT re-specify it; to "
+                 "revert, use undo_build.")
+    return "\n".join(lines)
+
+
 @mcp.tool()
 def build_from_spec(
     spec: str = Field(
@@ -214,17 +323,114 @@ def build_from_spec(
     if build_err:
         return f"Error: {build_err}"
 
+    _save_spec(parsed.name, parsed.model_dump())
     folder, results = _render_checks(
         parsed.name + ".r", parsed.views, parsed.render_size, parsed.lighting)
+    return _report(parsed, folder, results, f"Built region '{parsed.name}.r'")
 
-    lines = [f"Built region '{parsed.name}.r' from {len(parsed.parts)} part(s):"]
-    for p in parsed.parts:
-        lines.append(f"  {'+' if p.op == 'add' else '-'} {p.name} ({p.shape})")
-    lines.append(f"Check renders in:\n  {folder}")
-    for view, res in results:
-        ok = res.endswith(".png") and os.path.exists(res)
-        lines.append(f"  {view}: {res}" if ok else f"  {view}: FAILED - {res}")
-    lines.append("These check renders will be shown back to you as images to "
-                 "compare with the reference; if the shape is off, call "
-                 "build_from_spec again with a corrected spec.")
+
+@mcp.tool()
+def edit_build(
+    name: str = Field(
+        ...,
+        description="Region name of an existing build to edit (e.g. 'lego_brick').",
+    ),
+    edits: str = Field(
+        ...,
+        description=(
+            "A JSON list of edit ops applied to the CURRENT build -- send only "
+            "the change, not the whole model. Each op's key is 'action' (NOT "
+            "'op'; a part's own 'op' is its boolean role add/subtract):\n"
+            '[{"action": "move", "name": "stud3", "delta": [0, -1, 0]},\n'
+            ' {"action": "update", "name": "body", "size": [32, 16, 9.6]},\n'
+            ' {"action": "add", "part": {"name": "stud7", "shape": "cylinder",\n'
+            '    "op": "add", "center": [8,0,9.6], "height": [0,0,1.7], "radius": 2.4}},\n'
+            ' {"action": "remove", "name": "stud6"}]\n'
+            "Actions: move (relative delta on center), update (set any of center "
+            "/ size / height / radius / op / shape), add (a new part), remove. "
+            "Units mm."
+        ),
+    ),
+) -> str:
+    """Edit an existing build incrementally, WITHOUT re-specifying the model.
+
+    Loads the current saved spec for <name>, applies the edit ops, regenerates
+    the geometry and check renders, and saves the result as a new version (so it
+    can be undone).  Use this for ANY change to an existing model -- move /
+    resize / add / remove a part -- instead of rebuilding the whole thing with
+    build_from_spec.  That way a small fix never loses the rest of the model.
+    """
+    current = _latest_spec(name)
+    if current is None:
+        return (f"Error: no saved build named '{name}'. Build it first with "
+                f"build_from_spec.")
+    try:
+        ops = json.loads(edits)
+    except json.JSONDecodeError as exc:
+        return f"Error: edits is not valid JSON ({exc})."
+    if not isinstance(ops, list):
+        return "Error: edits must be a JSON list of ops."
+
+    new_parts, edit_errors = _apply_edits(current.get("parts", []), ops)
+    if edit_errors:
+        return ("Error: could not apply edits:\n"
+                + "\n".join(f"  - {e}" for e in edit_errors))
+    current["parts"] = new_parts
+    try:
+        parsed = BuildSpec.model_validate(current)
+    except ValidationError as exc:
+        return f"Error: edited spec is invalid.\n{exc}"
+    errors = _validate(parsed)
+    if errors:
+        return ("Error: edited spec is invalid:\n"
+                + "\n".join(f"  - {e}" for e in errors))
+
+    build_err = _build_geometry(parsed)
+    if build_err:
+        return f"Error: {build_err}"
+
+    _save_spec(parsed.name, parsed.model_dump())
+    folder, results = _render_checks(
+        parsed.name + ".r", parsed.views, parsed.render_size, parsed.lighting)
+    return _report(parsed, folder, results,
+                   f"Edited '{parsed.name}.r' ({len(ops)} op(s))")
+
+
+@mcp.tool()
+def undo_build(
+    name: str = Field(
+        ..., description="Region name to revert to its previous saved version."),
+) -> str:
+    """Undo the last change to a build: revert to the previous version and
+    rebuild it.  Repeated calls step further back through the history."""
+    versions = _versions(name)
+    if len(versions) < 2:
+        return (f"Error: nothing to undo for '{name}' "
+                f"({'no builds found' if not versions else 'only one version'}).")
+    os.remove(versions[-1])  # drop the current version; previous becomes current
+    parsed = BuildSpec.model_validate(_load_spec(versions[-2]))
+    build_err = _build_geometry(parsed)
+    if build_err:
+        return f"Error: {build_err}"
+    folder, results = _render_checks(
+        parsed.name + ".r", parsed.views, parsed.render_size, parsed.lighting)
+    return _report(parsed, folder, results,
+                   f"Reverted '{parsed.name}.r' to the previous version")
+
+
+@mcp.tool()
+def list_builds(
+    name: str = Field(..., description="Region name to list saved versions for."),
+) -> str:
+    """List the saved versions of a build (oldest first), with part counts."""
+    versions = _versions(name)
+    if not versions:
+        return f"No saved builds named '{name}'."
+    lines = [f"Saved versions of '{name}' (oldest first, last = current):"]
+    for i, path in enumerate(versions, 1):
+        try:
+            n = len(_load_spec(path).get("parts", []))
+        except (OSError, ValueError):
+            n = "?"
+        lines.append(f"  v{i:03d}: {n} part(s)")
     return "\n".join(lines)

@@ -61,3 +61,72 @@ def test_validate_flags_unknown_shape_and_duplicate_names():
     errors = RC._validate(spec)
     assert any("duplicate part name 'a'" in e for e in errors)
     assert any("unknown shape 'blob'" in e for e in errors)
+
+
+# --- edit ops -------------------------------------------------------------
+
+def _parts():
+    return [
+        {"name": "body", "shape": "box", "op": "add", "center": [0, 0, 0],
+         "size": [10, 10, 5]},
+        {"name": "stud", "shape": "cylinder", "op": "add", "center": [2, 0, 5],
+         "height": [0, 0, 2], "radius": 1},
+    ]
+
+
+def test_edit_move_is_relative():
+    new, errs = RC._apply_edits(_parts(), [{"action": "move", "name": "stud",
+                                            "delta": [0, -1, 0]}])
+    assert errs == []
+    stud = next(p for p in new if p["name"] == "stud")
+    assert stud["center"] == [2, -1, 5]
+
+
+def test_edit_update_sets_fields_and_add_remove():
+    edits = [
+        {"action": "update", "name": "body", "size": [12, 12, 5]},
+        {"action": "add", "part": {"name": "s2", "shape": "sphere",
+                                   "center": [0, 0, 8], "radius": 2}},
+        {"action": "remove", "name": "stud"},
+    ]
+    new, errs = RC._apply_edits(_parts(), edits)
+    assert errs == []
+    names = [p["name"] for p in new]
+    assert names == ["body", "s2"]
+    assert next(p for p in new if p["name"] == "body")["size"] == [12, 12, 5]
+
+
+def test_update_does_not_clobber_part_boolean_op():
+    # Regression: the edit action key is 'action', so a plain 'update' must NOT
+    # set the part's boolean 'op' to "update".
+    parts = [{"name": "t", "shape": "cylinder", "op": "subtract",
+              "center": [0, 0, 0], "height": [0, 0, 1], "radius": 1}]
+    new, errs = RC._apply_edits(parts, [{"action": "update", "name": "t",
+                                         "center": [1, 0, 0]}])
+    assert errs == []
+    assert new[0]["op"] == "subtract"   # unchanged, not "update"
+    assert new[0]["center"] == [1, 0, 0]
+
+
+def test_edit_reports_errors_and_does_not_mutate_input():
+    original = _parts()
+    new, errs = RC._apply_edits(original, [
+        {"action": "move", "name": "ghost", "delta": [1, 0, 0]},
+        {"action": "add", "part": {"name": "body"}},   # duplicate
+        {"action": "frobnicate"},                       # unknown action
+    ])
+    assert len(errs) == 3
+    assert original == _parts()  # input untouched (ops copy)
+
+
+def test_spec_history_save_list_and_latest(tmp_path, monkeypatch):
+    monkeypatch.setattr(RC, "_specs_root", lambda: str(tmp_path))
+    assert RC._versions("thing") == []
+    assert RC._latest_spec("thing") is None
+    RC._save_spec("thing", {"name": "thing", "parts": [{"name": "a"}]})
+    RC._save_spec("thing", {"name": "thing", "parts": [{"name": "a"}, {"name": "b"}]})
+    versions = RC._versions("thing")
+    assert len(versions) == 2
+    assert versions[0].endswith("v001.json")
+    assert versions[1].endswith("v002.json")
+    assert len(RC._latest_spec("thing")["parts"]) == 2

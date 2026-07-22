@@ -96,8 +96,9 @@ All configuration is managed through a `.env` file in the project root. A templa
 | Variable              | Description                                  | Default       |
 |-----------------------|----------------------------------------------|---------------|
 | `OPENAI_API_KEY`      | Your OpenAI API key (required)               | --            |
-| `OPENAI_MODEL`        | The OpenAI model to use                      | `gpt-4o`      |
-| `OPENAI_TEMPERATURE`  | Sampling temperature (0 = deterministic)     | `0`           |
+| `OPENAI_MODEL`        | The OpenAI model to use (confirm exact id in your dashboard) | `gpt-5.6-sol` |
+| `OPENAI_REASONING_EFFORT` | For reasoning models: `low`/`medium`/`high`/`max` (blank = `high`) | -- |
+| `OPENAI_TEMPERATURE`  | Sampling temperature for non-reasoning models (e.g. `gpt-4o`) | `0`           |
 | `BRLCAD_HOST`         | Host where the libmcpcad listener is running | `127.0.0.1`   |
 | `BRLCAD_PORT`         | Port the listener (`mcp_listen`) is bound to | `5555`        |
 | `BRLCAD_TIMEOUT`      | Socket timeout in seconds                    | `5.0`         |
