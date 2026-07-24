@@ -27,6 +27,59 @@ BLOCKED_COMMANDS: set[str] = {
 MAX_RETRY_ATTEMPTS = 5
 
 # ---------------------------------------------------------------------------
+# Destructive-command detection (for auto-snapshot / restore)
+# ---------------------------------------------------------------------------
+
+# Verbs that delete, rename, or redefine EXISTING objects.  Before running one
+# of these through execute_command we snapshot the objects it names (those that
+# currently exist) so a raw edit that goes wrong can be rolled back.  Pure
+# creation verbs (in/put/make) are intentionally NOT here: the name-conflict
+# rule already stops the agent from overwriting, and snapshotting every
+# primitive creation would be pointless churn.
+DESTRUCTIVE_VERBS: set[str] = {
+    "kill", "killall", "killtree", "rm",
+    "mv", "mvall",
+    "r", "c", "comb", "g",
+}
+
+# Tokens that appear in these commands but are never object names: boolean/set
+# operators and combination flags.
+_NON_OBJECT_TOKENS: set[str] = {"u", "-", "+", "n"}
+
+
+def _looks_numeric(token: str) -> bool:
+    try:
+        float(token)
+        return True
+    except ValueError:
+        return False
+
+
+def destructive_targets(command: str) -> list[str]:
+    """Object-name candidates a destructive command would delete/overwrite.
+
+    Returns the de-duplicated, order-preserving list of tokens that could name
+    existing objects (skipping the verb, flags, boolean operators, and numeric
+    args).  Empty list when *command* is not a destructive verb.  The caller
+    still intersects these with the live database before snapshotting, so
+    over-inclusion here is harmless.
+    """
+    parts = command.strip().split()
+    if not parts or parts[0].lower() not in DESTRUCTIVE_VERBS:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for tok in parts[1:]:
+        if tok.startswith("-") and len(tok) > 1:   # a flag like -f (but not "-")
+            continue
+        if tok in _NON_OBJECT_TOKENS or _looks_numeric(tok):
+            continue
+        if tok not in seen:
+            seen.add(tok)
+            out.append(tok)
+    return out
+
+# ---------------------------------------------------------------------------
 # Response parsing — keyed off the Tcl listener's prefixes
 # ---------------------------------------------------------------------------
 

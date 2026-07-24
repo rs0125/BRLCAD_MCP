@@ -282,6 +282,28 @@ Sweep an assembly for overlaps and resolve each by minimal sliding, re-running `
 
 Render the model the listener currently has open to a PNG, over the socket via the ged `rt` command (no `.g` path needed, no `opendb`). View presets (iso, front, side, top, back, and rear-quarter isometrics) or a custom azimuth/elevation, at three lighting levels: `studio` (default, camera-relative three-point rig — every angle lit the same), `model` (world-fixed rig — fixed-sun look), and `ambient` (evenly-lit, no rig). Renders entirely over the socket — `rt` writes the PNG directly, so no BRL-CAD binaries or `PATH` setup are required.
 
+The client feeds the resulting PNG back to the model as a user-role message, so the agent actually *sees* what it rendered (and can re-render from a better angle) instead of guessing from the file path.
+
+#### `render_previews`
+
+Batch several `view:lighting` variants into one timestamped folder as small labelled stamps (A/B/C…), for the stamp-first workflow: preview cheaply, let the user pick a label, then render the final.
+
+### Reconstruction (build from a reference image)
+
+#### `build_from_spec`
+
+Build a CSG region deterministically from a JSON spec (box / cylinder / sphere parts, unioned or subtracted) and render the requested check views in one step. Saves a versioned spec so edits stay reversible.
+
+#### `edit_build` / `undo_build` / `list_builds`
+
+Edit a spec-backed model with a small list of ops (move / update / add / remove a part) and rebuild — no need to re-send the whole model. `undo_build` reverts to the previous version; `list_builds` shows the saved versions.
+
+### Recovery (raw destructive edits)
+
+#### `restore_backup` / `list_backups`
+
+Raw destructive commands run through `execute_command` (`kill`, `rm`, `mv`, `r` redefining an existing region…) are auto-snapshotted first: the objects they would delete or overwrite are `keep`-exported to a small `.g` under `<render_dir>/backups/`. `restore_backup` rolls back the last one (via `kill` + `dbconcat`); `list_backups` lists the restore points. This is the safety net for hand edits; spec-backed models should prefer `undo_build`.
+
 ---
 
 ## Adding New Tools

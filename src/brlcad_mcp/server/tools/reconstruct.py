@@ -109,28 +109,60 @@ def _solid_cmd(part: Part) -> str:
     return f"in {n} sph {cx:g} {cy:g} {cz:g} {part.radius:g}"  # sphere
 
 
-def _region_expr(parts: list[Part]) -> str:
-    """Boolean expression for the region: 'u a.s - b.s u c.s' (add=u, sub=-)."""
-    toks = []
-    for p in parts:
-        toks.append(f"{'u' if p.op == 'add' else '-'} {p.name}.s")
-    return " ".join(toks)
+def _op_char(part: Part) -> str:
+    """The MGED set operator for a part's boolean op (add=u, subtract=-)."""
+    return "u" if part.op == "add" else "-"
+
+
+def _accum_name(region: str, i: int) -> str:
+    """Name of the i-th intermediate accumulation combination for *region*."""
+    return f"{region}.acc{i}"
+
+
+def _region_build_cmds(name: str, parts: list[Part]) -> list[str]:
+    """Commands that build the region as a STRICT left-to-right CSG accumulation.
+
+    BRL-CAD's ``r`` command binds each ``-``/``+`` to only the *most recent*
+    union operand, so a flat ``r x u a u b - h`` yields ``a u (b - h)`` -- the
+    subtraction misses ``a`` entirely.  To get the intended
+    ``(((a u b) - h) ...)`` we fold left to right through intermediate
+    combinations (``<name>.accN``), each combining the running accumulator with
+    the next part, so every operator applies to the whole solid so far.  The
+    final fold is emitted as the region itself.
+    """
+    solids = [f"{p.name}.s" for p in parts]
+    if len(parts) == 1:
+        return [f"r {name}.r u {solids[0]}"]
+    cmds: list[str] = []
+    acc = solids[0]
+    for i in range(1, len(parts) - 1):
+        step = _accum_name(name, i)
+        cmds.append(f"comb {step} u {acc} {_op_char(parts[i])} {solids[i]}")
+        acc = step
+    cmds.append(f"r {name}.r u {acc} {_op_char(parts[-1])} {solids[-1]}")
+    return cmds
 
 
 def _build_geometry(spec: BuildSpec) -> str | None:
     """Create the solids and the region over the socket.  None on success."""
     send_command("units mm")
-    # Idempotent rebuild: drop the region (and its refs) and the solids first.
-    send_command(f"killall {spec.name}.r")
+    # Idempotent rebuild: killtree drops the region plus its intermediate
+    # accumulation combs, then killall clears the solids (and any stray accN
+    # from a build whose part count later shrank).  Errors here are ignored --
+    # nothing to remove on a first build.
+    send_command(f"killtree {spec.name}.r")
     for p in spec.parts:
         send_command(f"killall {p.name}.s")
+    for i in range(1, len(spec.parts)):
+        send_command(f"killall {_accum_name(spec.name, i)}")
     for p in spec.parts:
         resp = send_command(_solid_cmd(p))
         if is_error_response(resp):
             return f"failed to create '{p.name}' ({p.shape}): {parse_response(resp)}"
-    resp = send_command(f"r {spec.name}.r {_region_expr(spec.parts)}")
-    if is_error_response(resp):
-        return f"failed to build region '{spec.name}.r': {parse_response(resp)}"
+    for cmd in _region_build_cmds(spec.name, spec.parts):
+        resp = send_command(cmd)
+        if is_error_response(resp):
+            return f"failed to build region '{spec.name}.r': {parse_response(resp)}"
     if spec.color and len(spec.color) == 3:
         r, g, b = spec.color
         send_command(f"comb_color {spec.name}.r {r} {g} {b}")

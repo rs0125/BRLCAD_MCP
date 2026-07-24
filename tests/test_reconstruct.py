@@ -26,13 +26,49 @@ def test_cylinder_and_sphere_commands():
     assert RC._solid_cmd(sph) == "in dot.s sph 0 0 0 5"
 
 
-def test_region_expression_uses_u_and_minus():
+def test_region_build_folds_left_to_right():
+    # BRL-CAD's flat 'r' would bind trailing subtractions to only the last
+    # union operand; we fold through intermediate combs so each operator
+    # applies to the whole accumulated solid.
     parts = [
         Part(name="body", shape="box", size=[10, 10, 10], op="add"),
         Part(name="hole", shape="sphere", radius=3, op="subtract"),
         Part(name="lug", shape="box", size=[2, 2, 2], op="add"),
     ]
-    assert RC._region_expr(parts) == "u body.s - hole.s u lug.s"
+    cmds = RC._region_build_cmds("widget", parts)
+    # (body - hole) as an intermediate comb, then unioned with lug in the region.
+    assert cmds == [
+        "comb widget.acc1 u body.s - hole.s",
+        "r widget.r u widget.acc1 u lug.s",
+    ]
+
+
+def test_region_build_subtractions_apply_to_whole_union():
+    # The angle-bracket bug: two plates then two holes.  Both holes must be
+    # subtracted from the union of BOTH plates, not just the last one.
+    parts = [
+        Part(name="left_plate", shape="box", size=[2.5, 50, 50]),
+        Part(name="right_plate", shape="box", size=[50, 2.5, 50]),
+        Part(name="left_hole", shape="cylinder", height=[4.5, 0, 0], radius=6,
+             op="subtract"),
+        Part(name="right_hole", shape="cylinder", height=[0, 12.5, 0], radius=6,
+             op="subtract"),
+    ]
+    cmds = RC._region_build_cmds("angle_bracket", parts)
+    assert cmds == [
+        "comb angle_bracket.acc1 u left_plate.s u right_plate.s",
+        "comb angle_bracket.acc2 u angle_bracket.acc1 - left_hole.s",
+        "r angle_bracket.r u angle_bracket.acc2 - right_hole.s",
+    ]
+
+
+def test_region_build_single_and_pair():
+    one = [Part(name="body", shape="box", size=[1, 1, 1])]
+    assert RC._region_build_cmds("m", one) == ["r m.r u body.s"]
+    pair = [Part(name="body", shape="box", size=[1, 1, 1]),
+            Part(name="hole", shape="sphere", radius=1, op="subtract")]
+    # A single add+subtract pair binds correctly even flat -- no comb needed.
+    assert RC._region_build_cmds("m", pair) == ["r m.r u body.s - hole.s"]
 
 
 def test_validate_accepts_a_good_spec():

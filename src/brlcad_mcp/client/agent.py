@@ -25,9 +25,17 @@ from brlcad_mcp.config import settings
 # attached image travels to it as an OpenAI image_url part (a base64 data URI).
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 
+# Slash-command aliases, matched on the first whitespace-delimited word so
+# "/images" no longer gets mistaken for "/image" (and vice versa).
+_IMAGE_CMDS = ("/image", "/images", "/img")
+_PASTE_CMDS = ("/paste", "/clip")
+_HELP_CMDS = ("/help", "/?")
+
 _HELP = """Commands:
   /image <path> [more paths] [prompt]  attach image file(s) and send a message
+                                       (aliases: /images, /img)
   /paste [prompt]                      attach an image from the clipboard
+                                       (alias: /clip)
   /help                                show this help
   exit | quit                          leave
 Drag-and-drop a file into the terminal to paste its path after /image.
@@ -62,56 +70,90 @@ def _clipboard_image_part() -> dict | None:
     return None
 
 
+def _image_message(rest: str) -> HumanMessage:
+    """Build a multimodal message from ``/image`` arguments.
+
+    ``rest`` is everything after the command word: one or more image paths
+    (leading), then an optional free-text prompt.  Raises ``ValueError`` with a
+    precise, user-facing message when no usable image is found.
+    """
+    tokens = rest.split()
+    images: list[Path] = []
+    prompt_tokens: list[str] = []
+    for i, tok in enumerate(tokens):
+        p = Path(tok.strip("\"'")).expanduser()
+        looks_like_image = p.suffix.lower() in _IMAGE_EXTS
+        if looks_like_image and p.is_file():
+            images.append(p)
+        elif looks_like_image:
+            # An image-looking path that does not exist -- almost always a
+            # typo'd or wrong-directory path, so say exactly what we tried.
+            raise ValueError(f"Could not find that image file: {p}")
+        else:
+            prompt_tokens = tokens[i:]
+            break
+    if not images:
+        raise ValueError(
+            "Usage: /image <path> [more paths] [prompt]. No image path found "
+            "(paths must come first; supported extensions: "
+            f"{', '.join(sorted(_IMAGE_EXTS))}).")
+    prompt = " ".join(prompt_tokens).strip() or "Here is a reference image."
+    parts = [{"type": "text", "text": prompt}]
+    parts += [_image_part_from_file(p) for p in images]
+    print(f"  (attached {len(images)} image(s): "
+          f"{', '.join(p.name for p in images)})")
+    return HumanMessage(content=parts)
+
+
+def _paste_message(rest: str) -> HumanMessage:
+    """Build a multimodal message from a clipboard image (``/paste``)."""
+    prompt = rest.strip() or "Here is a reference image."
+    part = _clipboard_image_part()
+    if part is None:
+        raise ValueError(
+            "No image on the clipboard (needs wl-paste or xclip, and an "
+            "image copied). Use /image <path> instead.")
+    print("  (attached image from clipboard)")
+    return HumanMessage(content=[{"type": "text", "text": prompt}, part])
+
+
 def _build_message(text: str):
     """Turn a line of REPL input into an agent message.
 
-    ``/image PATH [PATH...] [prompt]`` attaches one or more image files;
-    ``/paste [prompt]`` grabs an image from the clipboard.  Anything else is a
-    plain text turn.  Returns a ``HumanMessage`` (multimodal) or a
-    ``("user", text)`` tuple, or raises ``ValueError`` with a user-facing
-    message when an image command has nothing usable.
+    ``/image PATH [PATH...] [prompt]`` (aliases ``/images``, ``/img``) attaches
+    one or more image files; ``/paste [prompt]`` (alias ``/clip``) grabs an
+    image from the clipboard.  Command matching is on the first whitespace-
+    delimited word, so ``/images`` is not confused with ``/image``.  Anything
+    that is not a recognized command is a plain text turn.  Returns a
+    ``HumanMessage`` (multimodal) or a ``("user", text)`` tuple, or raises
+    ``ValueError`` with a user-facing message.
     """
-    if text.startswith("/image"):
-        tokens = text[len("/image"):].split()
-        images: list[Path] = []
-        rest: list[str] = []
-        for i, tok in enumerate(tokens):
-            p = Path(tok.strip("\"'")).expanduser()
-            if p.suffix.lower() in _IMAGE_EXTS and p.is_file():
-                images.append(p)
-            else:
-                rest = tokens[i:]
-                break
-        if not images:
-            raise ValueError(
-                "Usage: /image <path> [more paths] [prompt]. No readable image "
-                "file found (paths must come first; supported: "
-                f"{', '.join(sorted(_IMAGE_EXTS))}).")
-        prompt = " ".join(rest).strip() or "Here is a reference image."
-        parts = [{"type": "text", "text": prompt}]
-        parts += [_image_part_from_file(p) for p in images]
-        print(f"  (attached {len(images)} image(s): "
-              f"{', '.join(p.name for p in images)})")
-        return HumanMessage(content=parts)
-
-    if text.startswith("/paste"):
-        prompt = text[len("/paste"):].strip() or "Here is a reference image."
-        part = _clipboard_image_part()
-        if part is None:
-            raise ValueError(
-                "No image on the clipboard (needs wl-paste or xclip, and an "
-                "image copied). Use /image <path> instead.")
-        print("  (attached image from clipboard)")
-        return HumanMessage(content=[{"type": "text", "text": prompt}, part])
-
+    cmd, _, rest = text.partition(" ")
+    key = cmd.lower()
+    if key in _IMAGE_CMDS:
+        return _image_message(rest)
+    if key in _PASTE_CMDS:
+        return _paste_message(rest)
+    # An unrecognized slash command is a mistake, not a message to the agent --
+    # otherwise "/imae foo.png" would silently be sent as prose.
+    if cmd.startswith("/") and key not in _HELP_CMDS:
+        raise ValueError(
+            f"Unknown command: {cmd}. Type /help for the command list.")
     return ("user", text)
 
 
 # Tools whose renders we feed back to the model (as a USER message -- OpenAI
 # rejects images in a tool-role message, so the tool returns paths and the
 # client re-attaches the images here) so it can visually self-check its work.
-_RENDER_FEEDBACK_TOOLS = {"build_from_spec", "edit_build", "undo_build"}
-# Cap the automatic compare/rebuild rounds per user request so it can't loop.
+#
+# Two flavours: build tools produce check views that should be COMPARED to a
+# reference (count features, verify layout); pure render tools produce an image
+# the model asked for and must actually LOOK at (so "render it and tell me what
+# you see" genuinely works instead of the model bluffing from the file path).
+_BUILD_FEEDBACK_TOOLS = {"build_from_spec", "edit_build", "undo_build"}
+_RENDER_FEEDBACK_TOOLS = {"render_model", "render_previews"}
+_FEEDBACK_TOOLS = _BUILD_FEEDBACK_TOOLS | _RENDER_FEEDBACK_TOOLS
+# Cap the automatic compare/inspect rounds per user request so it can't loop.
 MAX_AUTO_ROUNDS = 3
 
 
@@ -140,6 +182,29 @@ def _compare_followup(pngs: list[str]) -> HumanMessage:
         "If anything is off, fix it with edit_build (small ops) -- or "
         "build_from_spec only if the whole layout is wrong. If everything "
         "matches, say so and stop.")}]
+    parts += [_image_part_from_file(Path(p)) for p in pngs]
+    return HumanMessage(content=parts)
+
+
+def _inspect_followup(pngs: list[str]) -> HumanMessage:
+    """A user-role message that shows a plain render back to the model to LOOK at.
+
+    Used for render_model / render_previews (no build spec involved): the model
+    must describe what is actually in the pixels, not infer from the file path.
+    """
+    parts = [{"type": "text", "text": (
+        "Here is the render you just produced (attached). LOOK at it and report "
+        "what is ACTUALLY visible -- do not describe what you expected:\n"
+        "1. Describe the geometry you see (shape, features, orientation).\n"
+        "2. If a reference image or a stated requirement is in context, say "
+        "explicitly whether the render matches it, and COUNT any repeated "
+        "features in both.\n"
+        "3. If the framing is bad or an expected feature is missing/occluded, "
+        "re-render from a better angle (render_model with a different "
+        "azimuth/elevation) before answering.\n"
+        "Then give the user the file path(s) and your honest assessment. If you "
+        "were only asked for a preview/stamp, stop after reporting and let the "
+        "user confirm before any final render.")}]
     parts += [_image_part_from_file(Path(p)) for p in pngs]
     return HumanMessage(content=parts)
 
@@ -209,6 +274,30 @@ If a creation command fails because the name already exists, **never delete
 or overwrite the existing object**.  Instead, pick a new unique name by
 appending an incrementing number (e.g. ``sphere1.s``, ``sphere2.s``) and
 retry.  Only delete or overwrite objects when the user explicitly asks.
+
+## Editing existing models — do NOT hand-demolish
+
+Prefer the smallest, most reversible edit, and NEVER rebuild a model by
+tearing it down first.
+
+- If the model was built with ``build_from_spec`` (it has a saved spec — check
+  ``list_builds``), change it ONLY through ``edit_build`` (small move / update /
+  add / remove ops) and revert with ``undo_build``.  Do NOT hand-edit a
+  spec-backed model with raw ``kill`` / ``rm`` / ``r`` via ``execute_command``:
+  that bypasses the spec history, so ``undo_build`` can no longer recover it.
+- To change one feature (e.g. fix a hole that did not subtract), operate on
+  THAT primitive alone (redefine just ``hole_x.s`` with ``in``, or re-issue the
+  single subtraction).  Do NOT ``kill`` the region and rebuild the whole tree —
+  that is how a model gets wiped.
+- Raw destructive commands (``kill``, ``killall``, ``rm``, ``mv``, ``r`` that
+  redefines an existing region…) are auto-snapshotted before they run.  If an
+  edit goes wrong, call ``restore_backup`` to roll back the last one, or
+  ``list_backups`` to see the restore points.  Tell the user this exists rather
+  than leaving them stuck.
+- When a rendered feature looks wrong, first confirm it is truly a geometry bug
+  (inspect with ``l`` and re-render from an angle that is NOT occluded — a
+  concave part hides features from an outside-corner view) before deleting
+  anything.  A "missing" hole is often just hidden by the viewing angle.
 
 ## Conversation memory
 
@@ -594,7 +683,7 @@ async def run_agent() -> None:
                 stripped = user_input.strip()
                 if stripped.lower() in {"exit", "quit"}:
                     break
-                if stripped.lower() in {"/help", "help"}:
+                if stripped.lower() in {*_HELP_CMDS, "help"}:
                     print(_HELP)
                     continue
                 if not stripped:
@@ -610,6 +699,7 @@ async def run_agent() -> None:
             print("AI is thinking...\n")
             final_answer = ""
             produced_pngs: list[str] = []
+            saw_build_feedback = False
             try:
                 async for event in agent.astream_events(
                     {"messages": [message]},
@@ -636,8 +726,11 @@ async def run_agent() -> None:
                         preview = full[:300] + "…" if len(full) > 300 else full
                         print(f"    ✓ Result: {preview}\n")
                         # Collect renders to feed back for visual self-check.
-                        if event.get("name") in _RENDER_FEEDBACK_TOOLS:
+                        tname = event.get("name")
+                        if tname in _FEEDBACK_TOOLS:
                             produced_pngs.extend(_extract_pngs(full))
+                            if tname in _BUILD_FEEDBACK_TOOLS:
+                                saw_build_feedback = True
 
                     # ── LLM produced a final text reply (no tool calls) ──
                     elif kind == "on_chat_model_end":
@@ -668,7 +761,9 @@ async def run_agent() -> None:
             # OpenAI accepts the images) for a self-check round -- bounded so it
             # cannot loop forever.
             if produced_pngs and auto_rounds < MAX_AUTO_ROUNDS:
-                follow_up = _compare_followup(produced_pngs)
+                follow_up = (_compare_followup(produced_pngs)
+                             if saw_build_feedback
+                             else _inspect_followup(produced_pngs))
                 auto_rounds += 1
 
 

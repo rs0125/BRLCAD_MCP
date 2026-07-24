@@ -20,6 +20,7 @@ from brlcad_mcp.server.tools.helpers import (
     is_error_response,
     parse_response,
 )
+from brlcad_mcp.server.tools.snapshots import maybe_snapshot
 from brlcad_mcp.transport import send_command
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,10 @@ def execute_command(
 
     logger.info("execute_command → %s", command)
 
+    # Snapshot existing objects a destructive command would delete/overwrite,
+    # so a raw edit that goes wrong can be rolled back with restore_backup.
+    snapshot_note = maybe_snapshot(command)
+
     try:
         result = send_command(command)
     except (ConnectionError, TimeoutError) as exc:
@@ -95,6 +100,9 @@ def execute_command(
 
     if not payload:
         payload = "(completed successfully — no output)"
+
+    if snapshot_note:
+        payload += snapshot_note
 
     return f"Command: {command}\nResult: {payload}"
 

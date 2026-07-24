@@ -11,9 +11,13 @@ def test_default_brlcad_config():
     assert cfg.buffer_size == 4096
 
 
-def test_default_llm_config():
+def test_default_llm_config(monkeypatch):
+    # Code default when no env override (the .env in the repo pins Sol, so drop
+    # it here to test the fallback baked into the dataclass).
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_TEMPERATURE", raising=False)
     cfg = LLMConfig()
-    assert cfg.model == "gpt-4o"
+    assert cfg.model == "gpt-5.6-sol"
     assert cfg.temperature == 0.0
 
 
