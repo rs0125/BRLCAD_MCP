@@ -23,11 +23,21 @@ from pydantic import BaseModel, Field, ValidationError
 from brlcad_mcp.config import settings
 from brlcad_mcp.server.app import mcp
 from brlcad_mcp.server.tools import rendering as R
-from brlcad_mcp.server.tools.helpers import is_error_response, parse_response
+from brlcad_mcp.server.tools.helpers import (
+    is_error_response,
+    ls_names,
+    parse_json_arg,
+    parse_region_members,
+    parse_response,
+    region_fold_cmds,
+)
 from brlcad_mcp.transport import send_command
 
 _SHAPES = ("box", "cylinder", "sphere")
 _OPS = ("add", "subtract")
+_HOLE_KINDS = ("through", "pocket")
+# Check views are diagnostic images: flat lighting keeps features countable.
+_CHECK_LIGHTING = "ambient"
 
 
 class Part(BaseModel):
@@ -45,6 +55,12 @@ class Part(BaseModel):
     size: list[float] | None = None
     height: list[float] | None = None
     radius: float | None = None
+    # Intent for a subtracted cylinder: "through" (a hole that exits the far
+    # face) or "pocket" (a blind recess that deliberately stops inside).  A
+    # verifier cannot infer this from geometry alone -- a cutter that stops
+    # inside is either a bug or exactly what was wanted -- so state it.  Left
+    # unset, it is inferred from the cutter's span and reported.
+    hole: str | None = None
 
 
 class BuildSpec(BaseModel):
@@ -53,9 +69,18 @@ class BuildSpec(BaseModel):
     name: str = "model"
     parts: list[Part]
     color: list[int] | None = None
+    # The overall size the author BELIEVES this spec produces, [Lx, Ly, Lz] in mm.
+    # Declaring it turns a silent placement error into a pre-build rejection:
+    # prose alone did not stop parts being centred outside a stated range (an
+    # L-bracket asked to span 0..50 mm kept coming out 52.5 mm), so the intent is
+    # checked against the geometry instead of merely being requested.
+    expect_bbox: list[float] | None = None
     views: list[str] = Field(default_factory=lambda: ["front", "side"])
     render_size: int = 256
-    lighting: str = "studio"
+    # Accepted for backwards compatibility but NOT used: check views are always
+    # rendered with flat ambient light so features stay countable (see
+    # _CHECK_LIGHTING).  Use render_model / render_previews for lit renders.
+    lighting: str = "ambient"
 
 
 def _validate(spec: BuildSpec) -> list[str]:
@@ -63,6 +88,15 @@ def _validate(spec: BuildSpec) -> list[str]:
     errors: list[str] = []
     if not spec.parts:
         return ["spec has no parts"]
+    # Catch a bad lighting mode HERE: otherwise every check render fails one by
+    # one with "unknown lighting mode" after the geometry is already built.
+    if spec.lighting not in R._LIGHTING_MODES:
+        errors.append(f"unknown lighting '{spec.lighting}' "
+                      f"(use {', '.join(R._LIGHTING_MODES)})")
+    for view in spec.views:
+        if view not in R._VIEWS:
+            errors.append(f"unknown view '{view}' "
+                          f"(use {', '.join(sorted(R._VIEWS))})")
     if spec.parts[0].op != "add":
         errors.append("the first part must have op 'add' (a region must start "
                       "with a solid, not a subtraction)")
@@ -91,12 +125,104 @@ def _validate(spec: BuildSpec) -> list[str]:
                 errors.append(f"'{p.name}': cylinder needs a positive radius")
         elif p.shape == "sphere" and (not p.radius or p.radius <= 0):
             errors.append(f"'{p.name}': sphere needs a positive radius")
+    errors.extend(_hole_intent_errors(spec))
+    errors.extend(_bbox_intent_errors(spec))
     return errors
 
 
-def _solid_cmd(part: Part) -> str:
-    """The MGED ``in`` command that creates this part's solid (<name>.s)."""
-    n = f"{part.name}.s"
+def _bbox_intent_errors(spec: BuildSpec) -> list[str]:
+    """Check a declared overall size against what the parts actually produce."""
+    if not spec.expect_bbox or len(spec.expect_bbox) != 3:
+        return []
+    from brlcad_mcp.server.tools.verify import expected_bbox_lengths
+
+    actual = expected_bbox_lengths(spec)
+    if actual is None:
+        return []
+    off = [(axis, want, got)
+           for axis, want, got in zip("XYZ", spec.expect_bbox, actual)
+           if abs(want - got) > max(0.01, want * 0.001)]
+    if not off:
+        return []
+    detail = "; ".join(f"{axis}: declared {want:g} mm but the parts span {got:g} mm"
+                       for axis, want, got in off)
+    return [f"expect_bbox does not match the geometry -- {detail}. Move the parts "
+            f"so the model occupies the intended range (check each centre and "
+            f"size), or correct expect_bbox if the declaration was wrong."]
+
+
+def _hole_intent_errors(spec: BuildSpec) -> list[str]:
+    """Check declared hole intent against the cutter's actual geometry.
+
+    ``hole`` states what a cavity is FOR, which geometry alone cannot tell us --
+    a cutter stopping inside is either a bug or a deliberate pocket.  Declaring
+    it lets us catch the mismatch here, before any geometry exists, instead of
+    building something that quietly is not what was asked for.
+    """
+    # Imported lazily: verify imports this module, so a top-level import would
+    # be circular.
+    from brlcad_mcp.server.tools.verify import (
+        _part_extent,
+        add_parts_extent,
+        local_material_extent,
+    )
+
+    errors: list[str] = []
+    material = add_parts_extent(spec)
+    if material is None:
+        return errors
+    for p in spec.parts:
+        if p.op != "subtract":
+            continue
+        cut = _part_extent(p)
+        # A cutter that does not reach the material removes nothing.  The build
+        # would "succeed" and verification would agree (it faithfully matches
+        # the spec), so this has to be caught as a SPEC error, here.
+        if not all(cut[i] < material[i + 3] and cut[i + 3] > material[i]
+                   for i in range(3)):
+            errors.append(
+                f"'{p.name}': this cutter does not overlap the material at all, "
+                f"so it removes nothing -- check its centre and size")
+            continue
+        if p.hole is None:
+            continue
+        if p.hole not in _HOLE_KINDS:
+            errors.append(f"'{p.name}': hole must be 'through' or 'pocket'")
+            continue
+        # Judge "through" against the material this cutter actually crosses, not
+        # the whole model: an L-bracket's union spans 50 mm in X, so a hole
+        # through its 2.5 mm upright would otherwise look like a blind pocket.
+        local = local_material_extent(p, spec)
+        spans = [i for i in range(3)
+                 if cut[i] <= local[i] and cut[i + 3] >= local[i + 3]]
+        if p.hole == "through" and not spans:
+            errors.append(
+                f"'{p.name}': declared hole 'through' but the cutter stops "
+                f"inside the material on every axis, so it would leave a blind "
+                f"pocket -- move its centre outside the near face and enlarge it "
+                f"past the far face (or declare hole 'pocket')")
+        if p.hole == "pocket" and spans:
+            errors.append(
+                f"'{p.name}': declared hole 'pocket' but the cutter crosses the "
+                f"whole material, so it would cut straight through -- shorten it "
+                f"to leave the intended depth (or declare hole 'through')")
+    return errors
+
+
+def _solid_name(region: str, part_name: str) -> str:
+    """Solid name for a part, NAMESPACED under its region.
+
+    A spec's parts are internal to its region, so they must not squat on global
+    names: two models both having a part called ``body`` would otherwise collide
+    (and a build would clobber the other's solid).  ``<region>_<part>.s`` keeps
+    every build hermetic.
+    """
+    return f"{region}_{part_name}.s"
+
+
+def _solid_cmd(part: Part, region: str = "") -> str:
+    """The MGED ``in`` command that creates this part's solid."""
+    n = _solid_name(region, part.name) if region else f"{part.name}.s"
     cx, cy, cz = part.center
     if part.shape == "box":
         sx, sy, sz = part.size  # type: ignore[misc]
@@ -130,17 +256,57 @@ def _region_build_cmds(name: str, parts: list[Part]) -> list[str]:
     the next part, so every operator applies to the whole solid so far.  The
     final fold is emitted as the region itself.
     """
-    solids = [f"{p.name}.s" for p in parts]
-    if len(parts) == 1:
-        return [f"r {name}.r u {solids[0]}"]
-    cmds: list[str] = []
-    acc = solids[0]
-    for i in range(1, len(parts) - 1):
-        step = _accum_name(name, i)
-        cmds.append(f"comb {step} u {acc} {_op_char(parts[i])} {solids[i]}")
-        acc = step
-    cmds.append(f"r {name}.r u {acc} {_op_char(parts[-1])} {solids[-1]}")
-    return cmds
+    members = [(_op_char(p), _solid_name(name, p.name)) for p in parts]
+    # accum_prefix is the bare model name so the combs stay `<name>.accN`, which
+    # is exactly what _build_geometry kills on a rebuild.
+    return region_fold_cmds(f"{name}.r", members, accum_prefix=name)
+
+
+def _owns_by_structure(spec: BuildSpec, region_members) -> bool:
+    """True if an existing region is built the way WE build regions.
+
+    Every solid we create is namespaced ``<region>_<part>.s`` and every
+    intermediate comb is ``<region>.accN``, so a region whose tree contains only
+    those could not have been assembled by hand.  Checking the structure means
+    ownership no longer depends on the saved-spec directory still being present --
+    deleting it used to make our own geometry look foreign and block rebuilds.
+    """
+    if not region_members:
+        return False
+    solid_prefix, acc_prefix = f"{spec.name}_", f"{spec.name}.acc"
+    return all(name.startswith(solid_prefix) or name.startswith(acc_prefix)
+               for _, name in region_members)
+
+
+def _collision_error(spec: BuildSpec, live_names: set[str],
+                     region_members=()) -> str | None:
+    """Refuse to overwrite geometry this workflow does not own.
+
+    ``_build_geometry`` deliberately kills the names it is about to create, so a
+    build could silently destroy a hand-made object that happens to share a
+    name.  A name is ours if we have a saved spec for it OR the region on disk is
+    structurally one of ours (see :func:`_owns_by_structure`).  Pure, so it is
+    unit-tested without a socket.
+    """
+    if _latest_spec(spec.name) is not None:
+        return None                       # our own model: rebuilding is fine
+    if _owns_by_structure(spec, region_members):
+        return None                       # our naming convention: also ours
+    clashes = [n for n in
+               [f"{spec.name}.r",
+                *(_solid_name(spec.name, p.name) for p in spec.parts)]
+               if n in live_names]
+    if not clashes:
+        return None
+    return (f"refusing to overwrite existing object(s) not built from a spec: "
+            f"{', '.join(sorted(clashes))}. Choose a different name, or remove "
+            f"them deliberately first (they are snapshotted, so restore_backup "
+            f"can undo that).")
+
+
+def _live_names() -> set[str]:
+    """Names currently in the open database (ls decorations stripped)."""
+    return ls_names(parse_response(send_command("ls")))
 
 
 def _build_geometry(spec: BuildSpec) -> str | None:
@@ -152,11 +318,11 @@ def _build_geometry(spec: BuildSpec) -> str | None:
     # nothing to remove on a first build.
     send_command(f"killtree {spec.name}.r")
     for p in spec.parts:
-        send_command(f"killall {p.name}.s")
+        send_command(f"killall {_solid_name(spec.name, p.name)}")
     for i in range(1, len(spec.parts)):
         send_command(f"killall {_accum_name(spec.name, i)}")
     for p in spec.parts:
-        resp = send_command(_solid_cmd(p))
+        resp = send_command(_solid_cmd(p, spec.name))
         if is_error_response(resp):
             return f"failed to create '{p.name}' ({p.shape}): {parse_response(resp)}"
     for cmd in _region_build_cmds(spec.name, spec.parts):
@@ -169,24 +335,32 @@ def _build_geometry(spec: BuildSpec) -> str | None:
     return None
 
 
-def _render_checks(region: str, views: list[str], size: int, lighting: str):
+def _render_checks(region: str, views: list[str], size: int):
     """Render each check view into a fresh timestamped folder.
 
-    Returns (folder, [(view, png_path_or_error), ...]).
+    Always uses AMBIENT lighting.  These images exist to be counted and compared
+    against a reference, not admired: a three-point rig lights a stud or a boss
+    the same colour as the face it stands on, so features wash out and become
+    hard to count, while flat ambient keeps every edge legible.  Beauty renders
+    are a separate job (render_model / render_previews).
+
+    Returns (folder, [(view, png_path_or_error), ...]); folder is None when
+    nothing was rendered.  The directory is created LAZILY, on the first actual
+    render: creating it up front left an empty timestamped folder behind on every
+    geometry-only build (``views: []``), which the eval does for each case.
     """
-    folder = os.path.join(settings.render.output_dir,
-                          "reconstruct_" + time.strftime("%Y%m%d_%H%M%S"))
-    os.makedirs(folder, exist_ok=True)
+    folder = None
     out = []
     for view in views:
         if view not in R._VIEWS:
             out.append((view, f"unknown view '{view}'"))
             continue
-        az, el = R._VIEWS[view]
+        if folder is None:
+            folder = os.path.join(settings.render.output_dir,
+                                  "reconstruct_" + time.strftime("%Y%m%d_%H%M%S"))
+            os.makedirs(folder, exist_ok=True)
         png = os.path.join(folder, f"{view}.png")
-        err = R._dispatch_render(region, az, el, size,
-                                 R._auto_ambient(lighting), 0, "draft",
-                                 lighting, png)
+        err = R.render(R.check_spec(region, view, size, _CHECK_LIGHTING), png)
         out.append((view, err or png))
     return folder, out
 
@@ -285,24 +459,38 @@ def _apply_edits(parts: list[dict], edits: list[dict]):
     return parts, errors
 
 
-def _report(parsed: BuildSpec, folder: str, results, header: str) -> str:
+def _report(parsed: BuildSpec, folder: str | None, results, header: str) -> str:
     lines = [f"{header} from {len(parsed.parts)} part(s):"]
     for p in parsed.parts:
         lines.append(f"  {'+' if p.op == 'add' else '-'} {p.name} ({p.shape})")
-    lines.append(f"Check renders in:\n  {folder}")
-    for view, res in results:
-        ok = isinstance(res, str) and res.endswith(".png") and os.path.exists(res)
-        lines.append(f"  {view}: {res}" if ok else f"  {view}: FAILED - {res}")
-    lines.append("These check renders will be shown back to you as images to "
-                 "compare with the reference. To change the model, use "
-                 "edit_build (a small list of ops) -- do NOT re-specify it; to "
-                 "revert, use undo_build.")
+    if not parsed.expect_bbox:
+        # The strongest size guard is opt-in, so say when it did not run rather
+        # than letting a silent absence read as a clean check.
+        lines.append("Note: expect_bbox was not declared, so the overall size "
+                     "was not checked against an intended value. Set it when the "
+                     "request states a size or a coordinate range.")
+    if folder:
+        lines.append(f"Check renders in:\n  {folder}")
+        for view, res in results:
+            ok = (isinstance(res, str) and res.endswith(".png")
+                  and os.path.exists(res))
+            lines.append(f"  {view}: {res}" if ok else f"  {view}: FAILED - {res}")
+        lines.append("These check renders will be shown back to you as images to "
+                     "compare with the reference. To change the model, use "
+                     "edit_build (a small list of ops) -- do NOT re-specify it; to "
+                     "revert, use undo_build.")
+    else:
+        # No views requested: say so rather than pointing at a folder that was
+        # deliberately never created.
+        lines.append("No check views were requested, so nothing was rendered.")
+        for view, res in results:
+            lines.append(f"  {view}: FAILED - {res}")
     return "\n".join(lines)
 
 
 @mcp.tool()
 def build_from_spec(
-    spec: str = Field(
+    spec: str | dict = Field(
         ...,
         description=(
             "A JSON model spec. Shape:\n"
@@ -338,10 +526,9 @@ def build_from_spec(
     was built, and the render paths; the check renders are then shown back to
     you as images to compare against the reference.
     """
-    try:
-        data = json.loads(spec)
-    except json.JSONDecodeError as exc:
-        return f"Error: spec is not valid JSON ({exc})."
+    data, err = parse_json_arg(spec, "spec")
+    if err:
+        return err
     try:
         parsed = BuildSpec.model_validate(data)
     except ValidationError as exc:
@@ -351,13 +538,20 @@ def build_from_spec(
     if errors:
         return "Error: invalid spec:\n" + "\n".join(f"  - {e}" for e in errors)
 
+    # Guardrail-as-tooling: never clobber geometry we did not build.
+    collision = _collision_error(
+        parsed, _live_names(),
+        parse_region_members(parse_response(send_command(f"l {parsed.name}.r"))))
+    if collision:
+        return f"Error: {collision}"
+
     build_err = _build_geometry(parsed)
     if build_err:
         return f"Error: {build_err}"
 
     _save_spec(parsed.name, parsed.model_dump())
     folder, results = _render_checks(
-        parsed.name + ".r", parsed.views, parsed.render_size, parsed.lighting)
+        parsed.name + ".r", parsed.views, parsed.render_size)
     return _report(parsed, folder, results, f"Built region '{parsed.name}.r'")
 
 
@@ -367,7 +561,7 @@ def edit_build(
         ...,
         description="Region name of an existing build to edit (e.g. 'lego_brick').",
     ),
-    edits: str = Field(
+    edits: str | list = Field(
         ...,
         description=(
             "A JSON list of edit ops applied to the CURRENT build -- send only "
@@ -396,10 +590,9 @@ def edit_build(
     if current is None:
         return (f"Error: no saved build named '{name}'. Build it first with "
                 f"build_from_spec.")
-    try:
-        ops = json.loads(edits)
-    except json.JSONDecodeError as exc:
-        return f"Error: edits is not valid JSON ({exc})."
+    ops, err = parse_json_arg(edits, "edits")
+    if err:
+        return err
     if not isinstance(ops, list):
         return "Error: edits must be a JSON list of ops."
 
@@ -423,7 +616,7 @@ def edit_build(
 
     _save_spec(parsed.name, parsed.model_dump())
     folder, results = _render_checks(
-        parsed.name + ".r", parsed.views, parsed.render_size, parsed.lighting)
+        parsed.name + ".r", parsed.views, parsed.render_size)
     return _report(parsed, folder, results,
                    f"Edited '{parsed.name}.r' ({len(ops)} op(s))")
 
@@ -445,7 +638,7 @@ def undo_build(
     if build_err:
         return f"Error: {build_err}"
     folder, results = _render_checks(
-        parsed.name + ".r", parsed.views, parsed.render_size, parsed.lighting)
+        parsed.name + ".r", parsed.views, parsed.render_size)
     return _report(parsed, folder, results,
                    f"Reverted '{parsed.name}.r' to the previous version")
 

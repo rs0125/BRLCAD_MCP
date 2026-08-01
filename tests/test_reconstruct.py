@@ -37,9 +37,10 @@ def test_region_build_folds_left_to_right():
     ]
     cmds = RC._region_build_cmds("widget", parts)
     # (body - hole) as an intermediate comb, then unioned with lug in the region.
+    # Solids are namespaced under the region so parts never collide globally.
     assert cmds == [
-        "comb widget.acc1 u body.s - hole.s",
-        "r widget.r u widget.acc1 u lug.s",
+        "comb widget.acc1 u widget_body.s - widget_hole.s",
+        "r widget.r u widget.acc1 u widget_lug.s",
     ]
 
 
@@ -56,19 +57,21 @@ def test_region_build_subtractions_apply_to_whole_union():
     ]
     cmds = RC._region_build_cmds("angle_bracket", parts)
     assert cmds == [
-        "comb angle_bracket.acc1 u left_plate.s u right_plate.s",
-        "comb angle_bracket.acc2 u angle_bracket.acc1 - left_hole.s",
-        "r angle_bracket.r u angle_bracket.acc2 - right_hole.s",
+        "comb angle_bracket.acc1 u angle_bracket_left_plate.s "
+        "u angle_bracket_right_plate.s",
+        "comb angle_bracket.acc2 u angle_bracket.acc1 "
+        "- angle_bracket_left_hole.s",
+        "r angle_bracket.r u angle_bracket.acc2 - angle_bracket_right_hole.s",
     ]
 
 
 def test_region_build_single_and_pair():
     one = [Part(name="body", shape="box", size=[1, 1, 1])]
-    assert RC._region_build_cmds("m", one) == ["r m.r u body.s"]
+    assert RC._region_build_cmds("m", one) == ["r m.r u m_body.s"]
     pair = [Part(name="body", shape="box", size=[1, 1, 1]),
             Part(name="hole", shape="sphere", radius=1, op="subtract")]
     # A single add+subtract pair binds correctly even flat -- no comb needed.
-    assert RC._region_build_cmds("m", pair) == ["r m.r u body.s - hole.s"]
+    assert RC._region_build_cmds("m", pair) == ["r m.r u m_body.s - m_hole.s"]
 
 
 def test_validate_accepts_a_good_spec():
@@ -166,3 +169,177 @@ def test_spec_history_save_list_and_latest(tmp_path, monkeypatch):
     assert versions[0].endswith("v001.json")
     assert versions[1].endswith("v002.json")
     assert len(RC._latest_spec("thing")["parts"]) == 2
+
+
+def test_validate_flags_unknown_lighting_and_view():
+    # Caught up front: otherwise the geometry builds and every check render
+    # fails one-by-one with "unknown lighting mode".
+    spec = BuildSpec(name="x", lighting="default", views=["iso", "bogus"],
+                     parts=[Part(name="b", shape="box", size=[1, 1, 1])])
+    errors = RC._validate(spec)
+    assert any("unknown lighting 'default'" in e for e in errors)
+    assert any("unknown view 'bogus'" in e for e in errors)
+
+
+# --- collision guard (guardrail as tooling) -------------------------------
+
+def test_collision_guard_refuses_to_clobber_foreign_geometry(monkeypatch):
+    monkeypatch.setattr(RC, "_latest_spec", lambda name: None)   # not ours
+    spec = BuildSpec(name="widget", parts=[
+        Part(name="body", shape="box", size=[1, 1, 1])])
+    err = RC._collision_error(spec, {"widget.r", "other.s"})
+    assert err and "widget.r" in err and "restore_backup" in err
+
+
+def test_collision_guard_allows_rebuilding_our_own_spec(monkeypatch):
+    # A saved spec means we built it -> rebuilding in place is expected.
+    monkeypatch.setattr(RC, "_latest_spec", lambda name: {"name": "widget"})
+    spec = BuildSpec(name="widget", parts=[
+        Part(name="body", shape="box", size=[1, 1, 1])])
+    assert RC._collision_error(spec, {"widget.r", "body.s"}) is None
+
+
+def test_collision_guard_allows_fresh_names(monkeypatch):
+    monkeypatch.setattr(RC, "_latest_spec", lambda name: None)
+    spec = BuildSpec(name="fresh", parts=[
+        Part(name="body", shape="box", size=[1, 1, 1])])
+    assert RC._collision_error(spec, {"unrelated.s"}) is None
+
+
+def test_live_names_strips_ls_decorations(monkeypatch):
+    # Regions are listed as 'a.r/R' -- the marker must be stripped so a name
+    # comparison against the live database actually matches.
+    monkeypatch.setattr(RC, "send_command",
+                        lambda c: "SUCCESS: a.r/R  b.s  c.c/  _GLOBAL@")
+    assert RC._live_names() == {"a.r", "b.s", "c.c", "_GLOBAL"}
+
+
+def test_part_solids_are_namespaced_under_the_region():
+    # Two models can both have a part called "body" without colliding.
+    assert RC._solid_name("bushing", "body") == "bushing_body.s"
+    p = Part(name="body", shape="box", center=[0, 0, 0], size=[2, 2, 2])
+    assert RC._solid_cmd(p, "bushing").startswith("in bushing_body.s rpp")
+
+
+def test_collision_guard_uses_namespaced_solid_names(monkeypatch):
+    # A pre-existing generic 'body.s' must NOT block a namespaced build.
+    monkeypatch.setattr(RC, "_latest_spec", lambda name: None)
+    spec = BuildSpec(name="bushing", parts=[
+        Part(name="body", shape="box", size=[1, 1, 1])])
+    assert RC._collision_error(spec, {"body.s"}) is None
+    # ...but its own namespaced name still guards.
+    assert RC._collision_error(spec, {"bushing_body.s"}) is not None
+
+
+def test_through_hole_in_one_flange_of_a_multi_part_model_is_not_a_pocket():
+    # Regression: judging "through" against the WHOLE model's extent made a hole
+    # through an L-bracket's 2.5 mm upright look like a blind pocket, because the
+    # union spans 50 mm in X.  It must be judged against the flange it crosses.
+    spec = BuildSpec(name="br", parts=[
+        Part(name="flange_yz", shape="box", center=[1.25, 25, 25],
+             size=[2.5, 50, 50]),
+        Part(name="flange_xz", shape="box", center=[25, 1.25, 25],
+             size=[50, 2.5, 50]),
+        Part(name="hole_yz", shape="cylinder", op="subtract",
+             center=[-2, 25, 25], height=[8, 0, 0], radius=6, hole="through"),
+    ])
+    assert RC._validate(spec) == []
+
+
+def test_no_views_creates_no_render_folder(monkeypatch):
+    # Regression: the timestamped folder was created before checking whether
+    # anything would be rendered, so every geometry-only build (views: []) left
+    # an empty directory behind -- dozens of them across an eval run.
+    def boom(*args, **kwargs):
+        raise AssertionError("must not create a directory when nothing renders")
+    monkeypatch.setattr(RC.os, "makedirs", boom)
+    folder, results = RC._render_checks("x.r", [], 256)
+    assert folder is None and results == []
+
+
+def test_report_without_renders_says_so_instead_of_naming_a_folder():
+    spec = BuildSpec(name="x", views=[], parts=[
+        Part(name="b", shape="box", size=[1, 1, 1])])
+    text = RC._report(spec, None, [], "Built region 'x.r'")
+    assert "No check views were requested" in text
+    assert "Check renders in" not in text
+
+
+def test_declared_expect_bbox_catches_a_shifted_placement():
+    # Prose alone did not stop this: an L-bracket asked to span 0..50 mm kept
+    # being built at -2.5..50 (52.5 mm).  Declaring the intended size turns it
+    # into a pre-build rejection.
+    spec = BuildSpec(name="b", views=[], expect_bbox=[50, 50, 50], parts=[
+        Part(name="x", shape="box", center=[25, -1.25, 25], size=[50, 2.5, 50]),
+        Part(name="y", shape="box", center=[-1.25, 25, 25], size=[2.5, 50, 50])])
+    errors = RC._validate(spec)
+    assert any("expect_bbox does not match" in e for e in errors)
+    assert any("52.5 mm" in e for e in errors)
+
+
+def test_correct_placement_satisfies_the_declaration():
+    spec = BuildSpec(name="b", views=[], expect_bbox=[50, 50, 50], parts=[
+        Part(name="x", shape="box", center=[25, 1.25, 25], size=[50, 2.5, 50]),
+        Part(name="y", shape="box", center=[1.25, 25, 25], size=[2.5, 50, 50])])
+    assert RC._validate(spec) == []
+
+
+def test_expect_bbox_is_optional():
+    spec = BuildSpec(name="b", views=[], parts=[
+        Part(name="x", shape="box", size=[1, 1, 1])])
+    assert RC._validate(spec) == []
+
+
+def test_check_views_render_flat_ambient_with_occlusion(monkeypatch):
+    # Diagnostic images, not presentation.  Flat ambient keeps every face evenly
+    # lit, but on its own a stud is the SAME colour as the face under it and
+    # disappears on a head-on view -- occlusion supplies the contact shading that
+    # makes repeated features countable.  A spec's `lighting` cannot change this.
+    seen = []
+
+    def fake_render(spec, png):
+        seen.append((spec.lighting, spec.ambient_samples))
+        return None
+    monkeypatch.setattr(RC.R, "render", fake_render)
+    monkeypatch.setattr(RC.os, "makedirs", lambda *a, **k: None)
+    RC._render_checks("x.r", ["iso", "top"], 256)
+    assert [light for light, _ in seen] == ["ambient", "ambient"]
+    assert all(ao > 0 for _, ao in seen)
+
+
+def test_ownership_survives_a_deleted_spec_directory(monkeypatch):
+    # The guard used to treat "no saved spec" as "not ours", so wiping the specs
+    # directory made our OWN geometry foreign and blocked every rebuild.
+    monkeypatch.setattr(RC, "_latest_spec", lambda name: None)
+    spec = BuildSpec(name="widget", views=[], parts=[
+        Part(name="body", shape="box", size=[1, 1, 1])])
+    ours = [("u", "widget.acc1"), ("-", "widget_hole.s")]
+    assert RC._collision_error(spec, {"widget.r"}, ours) is None
+
+
+def test_a_hand_built_region_of_the_same_name_is_still_refused(monkeypatch):
+    monkeypatch.setattr(RC, "_latest_spec", lambda name: None)
+    spec = BuildSpec(name="widget", views=[], parts=[
+        Part(name="body", shape="box", size=[1, 1, 1])])
+    # Members that are NOT in our namespace: a human assembled this.
+    handmade = [("u", "some_solid.s"), ("-", "another.s")]
+    err = RC._collision_error(spec, {"widget.r"}, handmade)
+    assert err and "widget.r" in err
+
+
+def test_structural_ownership_needs_actual_members(monkeypatch):
+    monkeypatch.setattr(RC, "_latest_spec", lambda name: None)
+    spec = BuildSpec(name="widget", views=[], parts=[
+        Part(name="body", shape="box", size=[1, 1, 1])])
+    # An empty listing proves nothing, so fall back to refusing.
+    assert RC._collision_error(spec, {"widget.r"}, ()) is not None
+
+
+def test_report_says_when_the_size_guard_did_not_run():
+    plain = BuildSpec(name="x", views=[], parts=[
+        Part(name="b", shape="box", size=[1, 1, 1])])
+    assert "expect_bbox was not declared" in RC._report(plain, None, [], "Built")
+    declared = BuildSpec(name="x", views=[], expect_bbox=[1, 1, 1], parts=[
+        Part(name="b", shape="box", size=[1, 1, 1])])
+    assert "expect_bbox was not declared" not in RC._report(
+        declared, None, [], "Built")

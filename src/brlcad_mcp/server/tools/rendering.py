@@ -34,6 +34,7 @@ from __future__ import annotations
 import math
 import os
 import time
+from dataclasses import dataclass, replace
 
 from pydantic import Field
 
@@ -212,7 +213,14 @@ def _ged_rt_and_wait(opts, png):
 
 
 def _draw_objects(obj):
-    """Draw each top object; return an error string on the first bad name."""
+    """Clear the display, then draw each top object; error on the first bad name.
+
+    The ``zap`` first is essential: ged_rt renders whatever is currently
+    DISPLAYED, so without clearing, rt also renders every object left drawn by
+    earlier renders in the session -- polluting the image with unrelated
+    geometry.  Zapping isolates the render to exactly ``obj``.
+    """
+    send_command("zap")
     for o in obj.split():
         resp = send_command(f"draw {o}")
         if is_error_response(resp):
@@ -243,67 +251,28 @@ def _view_params():
     return vsize, eye, center
 
 
-def _render_via_ged_rt(obj, az, el, size, amb, ambient_samples, quality, png):
-    """Ambient render over the socket with the ged `rt` command.
-
-    ged_rt renders the listener's OWN open database (it uses gedp->dbip), so we
-    need NO db path and never send `opendb` -- which sidesteps the MGED opendb
-    crash entirely.  It renders the *displayed* objects, so we draw first, set
-    the view, then rt.  Returns None on success or an error string.
-
-    Side effect: this draws `obj` and changes the listener's current view
-    (ae/autoview) -- visible in a live MGED.
-    """
-    try:
-        os.remove(png)  # clear any stale file so the poll is meaningful
-    except OSError:
-        pass
-    err = _draw_objects(obj)
-    if err:
-        return err
-    send_command(f"ae {az:g} {el:g}")
-    send_command("autoview")
-    return _ged_rt_and_wait(_rt_opts(size, amb, ambient_samples, quality), png)
-
-
-def _render_studio_via_ged_rt(obj, az, el, size, amb, ambient_samples,
-                              quality, lighting, png):
-    """Studio/model render over the socket -- no db path.
-
-    Same ged_rt idea as ambient, but we first build the three-point light rig on
-    the live database: draw the object, set the view, read the view params over
-    the socket (size/eye_pt/center), place the rig relative to that view, draw
-    the (invisible) lights, then rt.  The lights are killed afterwards so the db
-    is left as we found it apart from the object staying drawn.
-    """
-    try:
-        os.remove(png)
-    except OSError:
-        pass
-    err = _draw_objects(obj)
-    if err:
-        return err
-    send_command("units mm")  # rig math + light geometry are all in mm
-    send_command(f"ae {az:g} {el:g}")
-    send_command("autoview")
-    view = _view_params()
-    if view is None:
-        return ("Error: could not read the view parameters over the socket "
-                "(size/eye_pt/center). Is a model open in the listener?")
-    vsize, eye, center = view
-    positions = (_rig_positions(eye, center, vsize) if lighting == "studio"
-                 else _rig_positions_model(center, vsize))
-    lights = _make_lights(positions, float(vsize) * _LIGHT_RADIUS_FRAC)
-    try:
-        for n in lights:
-            send_command(f"draw {n}.r")
-        return _ged_rt_and_wait(
-            _rt_opts(size, amb, ambient_samples, quality), png)
-    finally:
-        _remove_lights(lights)
-
-
 _LIGHTING_MODES = ("studio", "model", "ambient")
+
+
+@dataclass(frozen=True)
+class RenderSpec:
+    """Everything one render needs, bundled so call sites don't thread 9 args.
+
+    ``lighting`` is 'studio'/'model' (three-point rig) or 'ambient' (plain).
+    ``ambient=None`` means auto-pick per lighting mode (see :func:`_auto_ambient`);
+    :func:`render` resolves it before doing any work.  Presets below build the
+    common bundles (preview / check / beauty); ``render_model`` builds one
+    directly for full control.
+    """
+
+    obj: str
+    az: float = 35.0
+    el: float = 25.0
+    size: int = 800
+    lighting: str = "studio"
+    quality: str = "clean"          # 'draft' (fast) or 'clean' (hypersampled)
+    ambient: float | None = None
+    ambient_samples: int = 0
 
 
 def _auto_ambient(lighting):
@@ -311,17 +280,112 @@ def _auto_ambient(lighting):
     return 1.0 if lighting in ("studio", "model") else 1.2
 
 
-def _dispatch_render(obj, az, el, size, amb, ambient_samples, quality,
-                     lighting, png):
-    """Route one render to the right ged_rt helper.  Returns None or an error."""
-    if lighting == "ambient":
-        return _render_via_ged_rt(
-            obj, az, el, size, amb, ambient_samples, quality, png)
-    if lighting in ("studio", "model"):
-        return _render_studio_via_ged_rt(
-            obj, az, el, size, amb, ambient_samples, quality, lighting, png)
-    return (f"Error: unknown lighting mode '{lighting}'. "
-            f"Use 'ambient', 'studio', or 'model'.")
+def _render_ambient(spec: RenderSpec, png):
+    """Plain ambient render over the socket (ged `rt`, no db path, no opendb).
+
+    ged_rt renders the *displayed* objects, so we draw first (which zaps), set
+    the view, then rt.  Returns None on success or an error string.
+    """
+    try:
+        os.remove(png)  # clear any stale file so the poll is meaningful
+    except OSError:
+        pass
+    err = _draw_objects(spec.obj)
+    if err:
+        return err
+    send_command(f"ae {spec.az:g} {spec.el:g}")
+    send_command("autoview")
+    return _ged_rt_and_wait(
+        _rt_opts(spec.size, spec.ambient, spec.ambient_samples, spec.quality),
+        png)
+
+
+def _render_rig(spec: RenderSpec, png):
+    """Studio/model three-point-rig render over the socket -- no db path.
+
+    Draw the object, set the view, read the view params (size/eye_pt/center),
+    place the rig relative to that view ('studio' = camera-relative, 'model' =
+    world-fixed), draw the lights, rt, then kill the lights.
+    """
+    try:
+        os.remove(png)
+    except OSError:
+        pass
+    err = _draw_objects(spec.obj)
+    if err:
+        return err
+    send_command("units mm")  # rig math + light geometry are all in mm
+    send_command(f"ae {spec.az:g} {spec.el:g}")
+    send_command("autoview")
+    view = _view_params()
+    if view is None:
+        return ("Error: could not read the view parameters over the socket "
+                "(size/eye_pt/center). Is a model open in the listener?")
+    vsize, eye, center = view
+    positions = (_rig_positions(eye, center, vsize) if spec.lighting == "studio"
+                 else _rig_positions_model(center, vsize))
+    lights = _make_lights(positions, float(vsize) * _LIGHT_RADIUS_FRAC)
+    try:
+        for n in lights:
+            send_command(f"draw {n}.r")
+        return _ged_rt_and_wait(
+            _rt_opts(spec.size, spec.ambient, spec.ambient_samples,
+                     spec.quality), png)
+    finally:
+        _remove_lights(lights)
+
+
+def render(spec: RenderSpec, png) -> str | None:
+    """The single render core: validate + auto-resolve ambient + dispatch.
+
+    Returns None on success or an error string.  Unknown lighting is rejected
+    up front, before any socket traffic.
+    """
+    if spec.lighting not in _LIGHTING_MODES:
+        return (f"Error: unknown lighting mode '{spec.lighting}'. "
+                f"Use 'ambient', 'studio', or 'model'.")
+    if spec.ambient is None:
+        spec = replace(spec, ambient=_auto_ambient(spec.lighting))
+    if spec.lighting == "ambient":
+        return _render_ambient(spec, png)
+    return _render_rig(spec, png)
+
+
+# --- presets: named RenderSpec bundles for the common render contexts ------
+
+def preview_spec(obj, view, lighting="studio", size=192, ambient_samples=0,
+                 quality="draft") -> RenderSpec:
+    """A cheap layout/lighting stamp (the render_previews stage)."""
+    az, el = _VIEWS[view]
+    return RenderSpec(obj=obj, az=az, el=el, size=size, lighting=lighting,
+                      quality=quality, ambient_samples=ambient_samples)
+
+
+# Ambient occlusion samples for check views.  Flat ambient light alone leaves a
+# stud or boss EXACTLY the same colour as the face it stands on, so features
+# vanish on a head-on view and cannot be counted; occlusion adds the contact
+# shading that makes them legible.  Kept modest -- AO costs render time.
+_CHECK_AO_SAMPLES = 32
+
+
+def check_spec(obj, view, size, lighting, ambient_samples=_CHECK_AO_SAMPLES):
+    """A build_from_spec orthographic check view: draft quality, flat + AO."""
+    az, el = _VIEWS[view]
+    return RenderSpec(obj=obj, az=az, el=el, size=size, lighting=lighting,
+                      quality="draft", ambient_samples=ambient_samples)
+
+
+def beauty_spec(obj, az, el, size=800, lighting="studio", ambient=None,
+                ambient_samples=64, quality="clean") -> RenderSpec:
+    """A finished, well-lit render -- the shape of a presentation image.
+
+    These defaults ARE ``render_model``'s defaults: it builds its spec through
+    here so "what a finished render looks like" is defined in one place rather
+    than duplicated between the preset and the tool signature.
+    """
+    return RenderSpec(obj=obj, az=az, el=el, size=size, lighting=lighting,
+                      quality=quality, ambient=ambient,
+                      ambient_samples=ambient_samples)
 
 
 def _parse_variants(variants: str):
@@ -354,7 +418,7 @@ def render_model(
         description="Object/assembly to render (e.g. 'all.g', 'havoc'). Space-"
         "separate to render several top objects together.",
     ),
-    view: str = Field(
+    view: str | None = Field(
         default="iso",
         description="View preset: iso, iso2 (front-quarter isometrics), iso_back, "
         "iso_back2 (rear-quarter isometrics), front, back, side, side2, top, "
@@ -369,7 +433,7 @@ def render_model(
     elevation: float | None = Field(
         default=None, description="Custom elevation in degrees (overrides preset)."
     ),
-    lighting: str = Field(
+    lighting: str | None = Field(
         default="studio",
         description="'ambient' = normal render (rt lighting + high ambient + "
         "ambient occlusion, no db changes). 'studio' = three-point camera-"
@@ -389,7 +453,7 @@ def render_model(
         description="Ambient-occlusion samples. 0 disables; 32 is gritty, 200 "
         "smooth. Higher looks better on opaque models but is slower.",
     ),
-    quality: str = Field(
+    quality: str | None = Field(
         default="clean",
         description="'draft' (no anti-aliasing, fast) or 'clean' (hypersampled).",
     ),
@@ -403,6 +467,12 @@ def render_model(
     three-point rig (lights stay put, so angles are lit from different sides -- a
     fixed-sun look); ``'ambient'`` is a quick evenly-lit shot.
     """
+    # A model often sends an explicit null for an argument it has no opinion on;
+    # that should mean "use the default", not fail the whole call.
+    view = view or "iso"
+    lighting = lighting or "studio"
+    quality = quality or "clean"
+
     az, el = _VIEWS.get(view, _VIEWS["iso"])
     if azimuth is not None:
         az = azimuth
@@ -420,8 +490,10 @@ def render_model(
     # db -- no db path, no `opendb` (which sidesteps the MGED opendb crash).  rt
     # writes the PNG directly (the .png extension selects the format), so there
     # is no .pix intermediate and no pix-png subprocess.
-    err = _dispatch_render(
-        obj, az, el, size, amb, ambient_samples, quality, lighting, png)
+    err = render(
+        beauty_spec(obj, az, el, size=size, lighting=lighting, ambient=amb,
+                    ambient_samples=ambient_samples, quality=quality),
+        png)
     if err:
         return err
     if lighting == "ambient":
@@ -493,11 +565,11 @@ def render_previews(
     legend, failures = [], []
     for i, (view, lighting) in enumerate(pairs):
         label = chr(ord("A") + i)
-        az, el = _VIEWS[view]
         png = os.path.join(folder, f"{label}_{view}_{lighting}.png")
-        err = _dispatch_render(
-            obj, az, el, size, _auto_ambient(lighting), ambient_samples,
-            quality, lighting, png)
+        err = render(
+            preview_spec(obj, view, lighting=lighting, size=size,
+                         ambient_samples=ambient_samples, quality=quality),
+            png)
         if err:
             failures.append(f"  {label} ({view}/{lighting}): {err}")
         else:

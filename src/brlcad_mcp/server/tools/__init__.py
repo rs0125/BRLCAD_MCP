@@ -15,3 +15,4 @@ from brlcad_mcp.server.tools import primitives as primitives  # noqa: F401
 from brlcad_mcp.server.tools import reconstruct as reconstruct  # noqa: F401
 from brlcad_mcp.server.tools import rendering as rendering  # noqa: F401
 from brlcad_mcp.server.tools import snapshots as snapshots  # noqa: F401
+from brlcad_mcp.server.tools import verify as verify  # noqa: F401

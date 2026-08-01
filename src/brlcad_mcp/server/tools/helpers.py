@@ -8,6 +8,7 @@ into the prefix the tools below key off of.
 
 from __future__ import annotations
 
+import json
 import logging
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,86 @@ def destructive_targets(command: str) -> list[str]:
 
 _SUCCESS_PREFIX = "SUCCESS:"
 _ERROR_PREFIX = "ERROR:"
+
+
+def parse_json_arg(value, what: str = "argument"):
+    """Accept a JSON *string* or an already-decoded object; return (data, error).
+
+    Models pass structured tool arguments either way -- as a JSON string or as a
+    real object -- and a str-only annotation turns the latter into a hard
+    ToolException that kills the turn.  Tools taking JSON payloads use this so
+    both forms work and a bad payload becomes a readable message instead.
+    """
+    if isinstance(value, (dict, list)):
+        return value, None
+    if isinstance(value, str):
+        try:
+            return json.loads(value), None
+        except json.JSONDecodeError as exc:
+            return None, f"Error: {what} is not valid JSON ({exc})."
+    return None, (f"Error: {what} must be a JSON object or a JSON string, "
+                  f"got {type(value).__name__}.")
+
+
+def region_fold_cmds(region: str, members: list[tuple[str, str]],
+                     accum_prefix: str | None = None) -> list[str]:
+    """Commands building *region* as a STRICT left-to-right CSG accumulation.
+
+    BRL-CAD's ``r`` binds each ``-``/``+`` to only the *most recent union
+    operand*, so a flat ``r x u a u b - h`` yields ``a u (b - h)`` and the
+    subtraction misses ``a`` entirely.  Folding through intermediate
+    combinations (``<accum_prefix>.accN``) makes every operator apply to the
+    whole solid accumulated so far.
+
+    *members* is ``[(op, name), ...]`` in order, where op is ``u``, ``-`` or
+    ``+``; the first member's op is ignored (it seeds the accumulation).
+    *accum_prefix* names the intermediate combs and defaults to *region*;
+    callers that already clean up a particular naming pass their own so no
+    orphan combs are left behind on a rebuild.
+    """
+    if not members:
+        return []
+    prefix = accum_prefix or region
+    names = [name for _, name in members]
+    if len(members) == 1:
+        return [f"r {region} u {names[0]}"]
+    cmds: list[str] = []
+    acc = names[0]
+    for i in range(1, len(members) - 1):
+        step = f"{prefix}.acc{i}"
+        cmds.append(f"comb {step} u {acc} {members[i][0]} {names[i]}")
+        acc = step
+    cmds.append(f"r {region} u {acc} {members[-1][0]} {names[-1]}")
+    return cmds
+
+
+def parse_region_members(l_output: str) -> list[tuple[str, str]]:
+    """Top-level ``(op, name)`` members from an ``l <region>`` listing.
+
+    ``l`` prints one indented ``<op> <name>`` line per member, e.g.::
+
+        widget.r:  REGION id=1000 ...
+           u body.s
+           - hole.s
+    """
+    members: list[tuple[str, str]] = []
+    for line in l_output.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0] in ("u", "-", "+"):
+            members.append((parts[0], parts[1]))
+    return members
+
+
+def ls_names(ls_output: str) -> set[str]:
+    """Bare object names from an ``ls`` payload, stripped of its decorations.
+
+    ``ls`` marks combinations with a trailing ``/`` and regions with ``/R``
+    (e.g. ``plate.r/R``), plus ``@``/``*`` flags.  Anything comparing names
+    against the live database must strip these first -- otherwise a lookup for
+    ``plate.r`` never matches the listed ``plate.r/R``.
+    """
+    return {tok.split("/")[0].rstrip("@*")
+            for tok in ls_output.split()} - {""}
 
 
 def is_error_response(response: str) -> bool:

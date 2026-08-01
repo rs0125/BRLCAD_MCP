@@ -54,3 +54,15 @@ def test_manifest_listing_is_newest_first(tmp_path, monkeypatch):
 
 def test_sidecar_path_pairs_with_g_file():
     assert S._sidecar_path("/x/snap_1.g") == "/x/snap_1.json"
+
+
+def test_ls_parsing_strips_region_marker():
+    # Regression: 'plate.r/R' must reduce to 'plate.r', or a destructive command
+    # naming a REGION never matches the live listing and the snapshot is skipped.
+    names = S._parse_ls_names("plate.r/R  body.s  sub.c/  _GLOBAL@")
+    assert names == {"plate.r", "body.s", "sub.c", "_GLOBAL"}
+
+
+def test_region_destructive_target_is_seen_as_live():
+    live = S._parse_ls_names("plate.r/R  body.s")
+    assert "plate.r" in live          # so `kill plate.r` gets snapshotted

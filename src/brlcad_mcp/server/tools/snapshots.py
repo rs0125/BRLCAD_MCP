@@ -28,6 +28,7 @@ from brlcad_mcp.server.app import mcp
 from brlcad_mcp.server.tools.helpers import (
     destructive_targets,
     is_error_response,
+    ls_names,
     parse_response,
 )
 from brlcad_mcp.transport import send_command
@@ -46,14 +47,11 @@ def _backups_root() -> str:
 def _parse_ls_names(ls_output: str) -> set[str]:
     """Object names from an ``ls`` payload, stripped of MGED decorations.
 
-    ``ls`` may append ``/`` (comb), ``@`` (global), ``*`` etc. and lays names
-    out across whitespace/columns.  We only need the bare names.
+    Delegates to the shared :func:`ls_names`, which also strips the ``/R``
+    region marker -- without that, a destructive command naming a REGION never
+    matched the live listing and the snapshot was silently skipped.
     """
-    names: set[str] = set()
-    for tok in ls_output.split():
-        names.add(tok.rstrip("/@*").strip())
-    names.discard("")
-    return names
+    return ls_names(ls_output)
 
 
 def _sidecar_path(g_path: str) -> str:
