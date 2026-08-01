@@ -66,8 +66,8 @@ _VIEWS = {
 # Brightness/ambient tuned via an A/B sweep ("punchy": low ambient fill so the
 # directional lights dominate, keeping true material colour and clear shaping).
 #
-# MODEL SCALING (per mentor feedback on dark renders): the rig scales with the
-# model through GEOMETRY, not brightness.  The offset factors are multiplied by
+# MODEL SCALING (large models rendered too dark before this): the rig scales
+# with the model through GEOMETRY, not brightness.  The offsets are multiplied by
 # the view size (see _rig_positions), so the lights always sit a proportional
 # distance outside the model, and the light radius is a fixed fraction of the
 # view size (_LIGHT_RADIUS_FRAC) so shadow softness stays consistent at any

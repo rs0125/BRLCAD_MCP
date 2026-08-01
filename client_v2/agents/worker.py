@@ -25,6 +25,7 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import AgentState as _LCAgentState
 from langchain.agents.middleware import SummarizationMiddleware
 
+from client_v2.prompts import resolve
 from client_v2.state import AgentState
 
 # Context management.  A long modelling session accumulates large tool results
@@ -58,16 +59,22 @@ def make_context_middleware(model, trigger_tokens: int = SUMMARISE_AT_TOKENS,
     )
 
 
-def make_worker_node(model, tools, system_prompt, middleware=None):
+def make_worker_node(model, tools, system_prompt=None, middleware=None):
     """Build a worker node that runs a tool loop over *tools*.
 
     Returns only the messages the agent newly produced, which add_messages
     appends to the shared graph state.
+
+    ``system_prompt`` may be text, a callable, or None for the prompt library's
+    ``worker`` entry.  It is resolved once, here, because create_agent wants a
+    string -- and it only matters on the registry-less path, since the
+    SkillsMiddleware supplies the prompt (re-read per call) whenever skills are
+    loaded.
     """
     agent = create_agent(
         model=model,
         tools=tools,
-        system_prompt=system_prompt,
+        system_prompt=resolve(system_prompt, "worker"),
         middleware=list(middleware or []),
         state_schema=WorkerState,
     )

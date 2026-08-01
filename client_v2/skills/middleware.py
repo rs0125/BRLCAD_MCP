@@ -18,6 +18,7 @@ import json
 
 from langchain.agents.middleware import dynamic_prompt
 
+from client_v2.prompts import resolve
 from client_v2.skills import SkillRegistry
 
 
@@ -50,7 +51,7 @@ def plan_skill_ids(plan) -> list[str]:
     return out
 
 
-def compose_worker_prompt(base_prompt: str, registry: SkillRegistry,
+def compose_worker_prompt(base_prompt, registry: SkillRegistry,
                           active_skill: str | None = None,
                           plan=None) -> str:
     """Base worker prompt + skill catalog + the plan (or a single active skill).
@@ -61,10 +62,15 @@ def compose_worker_prompt(base_prompt: str, registry: SkillRegistry,
     step, chosen arbitrarily -- so the planner's ordering and bound parameters
     were thrown away and the worker re-decided everything.
 
-    Falls back to a single ``active_skill`` when there is no usable plan.  Pure.
+    ``base_prompt`` may be text, a callable, or None for the prompt library's
+    ``worker`` entry.  Resolving it HERE, on every model call, is what lets a
+    ``/reload`` of an edited prompt file take effect mid-session.
+
+    Falls back to a single ``active_skill`` when there is no usable plan.  Pure
+    apart from that lookup.
     """
     parts = [
-        base_prompt.strip(),
+        resolve(base_prompt, "worker").strip(),
         "",
         "## Available skills",
         "These are structured procedures you can follow. The catalog below is "
@@ -88,7 +94,7 @@ def compose_worker_prompt(base_prompt: str, registry: SkillRegistry,
     return "\n".join(parts)
 
 
-def make_skills_middleware(registry: SkillRegistry, base_prompt: str):
+def make_skills_middleware(registry: SkillRegistry, base_prompt=None):
     """Build a dynamic-prompt middleware that injects skills via the registry."""
 
     @dynamic_prompt

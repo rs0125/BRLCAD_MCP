@@ -1,6 +1,6 @@
 """The thin agents -- one module per role, each with a single job.
 
-Following the mentor's decomposition of the old monolith:
+The old monolithic prompt, decomposed by role:
 
 * ``conversational`` -- intake: is this a work request, or just conversation?
 * ``planner``        -- turns a request into an ordered, parameterised plan.

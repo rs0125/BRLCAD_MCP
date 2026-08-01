@@ -6,7 +6,7 @@ Layout mirrors the architecture (see DESIGN.md):
     graph.py      wires the agents into a LangGraph state machine
     state.py      the shared state every node reads and updates
     model.py      the LLM factory (OpenAI Responses API, real reasoning)
-    prompts.py    thin per-role prompts -- the monolith's replacement
+    prompts/      thin per-role prompts as editable files, and their loader
     agents/       one module per role: intake, planner, worker, verifier,
                   visual, formatter
     pipeline/     deterministic plan schema + executor (no model calls)

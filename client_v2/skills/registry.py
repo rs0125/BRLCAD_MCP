@@ -1,9 +1,9 @@
 """Skill / workflow definitions and their registry (DESIGN.md §5).
 
 A *skill* is a structured, dynamically-loaded definition of one capability --
-NOT prose baked into a prompt.  The schema mirrors what Sean asked for: I/O,
-preconditions, dependencies, steps, examples, cautions, success/abort criteria,
-recovery actions, and effects.  Definitions live as YAML under
+NOT prose baked into a prompt.  The schema covers I/O, preconditions,
+dependencies, steps, examples, cautions, success/abort criteria, recovery
+actions, and effects.  Definitions live as YAML under
 ``client_v2/skills/definitions/`` and are loaded by :class:`SkillRegistry` at
 runtime (and reloadable, for on-the-fly debugging).
 

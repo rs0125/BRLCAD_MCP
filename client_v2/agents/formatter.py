@@ -15,7 +15,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from client_v2.agents.conversational import last_human_text
 from client_v2.agents.verifier import turn_texts
-from client_v2.prompts import FORMATTER_SYSTEM
+from client_v2.prompts import PROMPTS
 
 
 def needs_formatting(state) -> bool:
@@ -55,7 +55,7 @@ def make_formatter_node(model):
         prompt = (f"User asked:\n{last_human_text(state)}\n\n"
                   f"Results:\n{results_digest(state)}")
         reply = await model.ainvoke(
-            [SystemMessage(content=FORMATTER_SYSTEM),
+            [SystemMessage(content=PROMPTS.text("formatter")),
              HumanMessage(content=prompt)])
         return {"messages": [reply]}
 

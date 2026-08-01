@@ -9,8 +9,9 @@ Set ``CLIENT_V2_DEBUG=true`` to stream a per-node agent trace (routing, model
 turns, tool calls, tool results) instead of just the final answer.
 
 ``/image`` and ``/paste`` attach a reference image -- the input the
-model_from_dimensioned_sketch workflow works from.  ``/skills`` and ``/reload``
-inspect and hot-reload the skill definitions.
+model_from_dimensioned_sketch workflow works from.  ``/skills`` and ``/prompts``
+list what is loaded, and ``/reload`` re-reads both from disk, so a skill or a
+prompt file can be edited and retried without restarting the session.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from brlcad_mcp.config import settings
 from client_v2.agents.conversational import message_text
 from client_v2.graph import build_graph
 from client_v2.model import build_model
-from client_v2.prompts import WORKER_SYSTEM
+from client_v2.prompts import PROMPTS
 from client_v2.runlog import open_run_log
 from client_v2.skills import SkillRegistry
 from client_v2.terminal.attachments import (
@@ -151,7 +152,6 @@ async def run() -> None:
         graph = build_graph(
             worker_model=worker_model,
             tools=tools,
-            worker_prompt=WORKER_SYSTEM,
             registry=registry,
             checkpointer=MemorySaver(),
             log=log,
@@ -189,8 +189,13 @@ async def run() -> None:
                     print(HELP)
                 elif parsed.name == "skills":
                     print(registry.catalog())
+                elif parsed.name == "prompts":
+                    print(PROMPTS.catalog())
                 elif parsed.name == "reload":
-                    print(registry.reload())   # runtime hot-reload of defs
+                    # Both are edit-then-retry surfaces, so one command re-reads
+                    # both rather than making you remember which needs which.
+                    print(registry.reload())
+                    print(PROMPTS.reload())
                 continue
             message = (HumanMessage(content=parsed[1])
                        if isinstance(parsed, tuple) else parsed)

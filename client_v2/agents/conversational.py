@@ -1,6 +1,6 @@
 """The conversational agent (intake) — the primary/initial agent.
 
-Its job (Sean's "understand" phase): take the user's turn and decide whether
+Its job (the "understand" phase): take the user's turn and decide whether
 it's a work request (route to the worker, which has tools) or plain
 conversation (answer directly).  It holds no tools itself.
 
@@ -16,6 +16,7 @@ from collections.abc import Callable
 
 from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
 
+from client_v2.prompts import PROMPTS
 from client_v2.state import AgentState
 
 ROUTE_WORK = "work"
@@ -26,13 +27,6 @@ _CHAT_ONLY = {
     "hi", "hello", "hey", "yo", "sup", "thanks", "thank you", "ty",
     "bye", "goodbye", "ok", "okay", "cool", "nice", "great", "got it",
 }
-
-CHAT_SYSTEM_PROMPT = (
-    "You are the conversational front-end of a BRL-CAD geometry assistant. "
-    "Reply briefly and plainly (this is a terminal, no markdown). If the user "
-    "wants geometry built, modeled, rendered, or analysed, they are routed to a "
-    "separate worker -- so here just converse, greet, or clarify."
-)
 
 
 def message_text(msg: AnyMessage) -> str:
@@ -103,6 +97,7 @@ def make_respond_node(model):
     """Node for the chat path: a brief conversational reply (no tools)."""
     def respond(state: AgentState) -> AgentState:
         msgs = state.get("messages", [])
-        reply = model.invoke([SystemMessage(content=CHAT_SYSTEM_PROMPT), *msgs])
+        reply = model.invoke(
+            [SystemMessage(content=PROMPTS.text("chat")), *msgs])
         return {"messages": [reply]}
     return respond

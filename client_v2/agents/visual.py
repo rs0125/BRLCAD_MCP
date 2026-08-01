@@ -26,6 +26,7 @@ from pathlib import Path
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 from client_v2.agents.conversational import message_text
+from client_v2.prompts import PROMPTS
 from client_v2.terminal.attachments import attached_image_count, image_part_from_file
 
 # One visual correction round per user turn: a vision judgement is the weakest
@@ -35,24 +36,6 @@ MAX_VISUAL_ROUNDS = 1
 MAX_RENDERS = 4
 
 _PNG = re.compile(r"/[^\s'\"]+\.png")
-
-VISUAL_SYSTEM = """\
-You are checking whether a built 3D model matches the reference image the user
-provided. You have no tools.
-
-Compare the attached render(s) with the reference. Judge SHAPE and LAYOUT only --
-overall form, feature positions, and how many of each repeated feature there are.
-Ignore colour, lighting, materials and image quality; the renders are untextured
-previews.
-
-COUNT any repeated features (studs, holes, bolts, tiers) in the render AND in the
-reference, and state both numbers. Do not say it looks right without counting.
-
-Answer on the first line with exactly one of:
-  MATCH
-  MISMATCH: <the single most important difference, and what to change>
-Then at most two short sentences of justification.
-"""
 
 
 def find_render_paths(state) -> list[str]:
@@ -116,7 +99,7 @@ def make_visual_check_node(model):
             "reference image above.")}]
         parts += [image_part_from_file(Path(p)) for p in renders[:MAX_RENDERS]]
         reply = await model.ainvoke([
-            SystemMessage(content=VISUAL_SYSTEM),
+            SystemMessage(content=PROMPTS.text("visual")),
             reference_message(state),         # just the reference, not the history
             HumanMessage(content=parts),
         ])

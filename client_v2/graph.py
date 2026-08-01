@@ -97,7 +97,7 @@ def build_graph(
     *,
     worker_model,
     tools,
-    worker_prompt: str,
+    worker_prompt=None,
     registry: SkillRegistry | None = None,
     chat_model=None,
     planner_model=None,
@@ -115,6 +115,10 @@ def build_graph(
     SkillsMiddleware that injects the catalog plus the active skill's detail.
     ``planner_model`` defaults to ``worker_model`` (a higher-effort model can be
     passed here later).  Pass a ``checkpointer`` for cross-turn memory.
+
+    ``worker_prompt`` may be text, a callable, or None -- the default -- for the
+    prompt library's ``worker`` entry, re-read on every model call so an edited
+    prompt file takes effect without a restart.  Tests pass a fixed string.
     """
     log = log or null_log()
     chat_model = chat_model or worker_model

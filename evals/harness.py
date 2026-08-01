@@ -340,7 +340,6 @@ async def run_agent_mode(cases: list[Case]) -> list[CaseResult]:
     from client_v2.agents.conversational import message_text
     from client_v2.graph import build_graph
     from client_v2.model import build_model
-    from client_v2.prompts import WORKER_SYSTEM
     from client_v2.runlog import open_run_log
     from client_v2.skills import SkillRegistry
 
@@ -369,8 +368,7 @@ async def run_agent_mode(cases: list[Case]) -> list[CaseResult]:
         tools = await load_mcp_tools(session)
         # A checkpointer + per-case thread makes the approval turn a genuine
         # continuation of the proposal turn.
-        graph = build_graph(worker_model=model, tools=tools,
-                            worker_prompt=WORKER_SYSTEM, registry=registry,
+        graph = build_graph(worker_model=model, tools=tools, registry=registry,
                             checkpointer=MemorySaver(), log=log)
 
         async def drive(payload, cfg):

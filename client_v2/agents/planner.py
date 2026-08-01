@@ -21,19 +21,8 @@ from client_v2.agents.conversational import last_human_text, message_text
 from client_v2.agents.verifier import failure_context
 from client_v2.agents.visual import visual_failure_context
 from client_v2.pipeline.plan import parse_plan
+from client_v2.prompts import PROMPTS
 from client_v2.skills import SkillRegistry
-
-PLANNER_SYSTEM = (
-    "You are the planner for a BRL-CAD geometry agent. Produce an ORDERED plan "
-    "of skill steps that fulfills the user's request, then stop. Reply with "
-    "ONLY a JSON object of the form:\n"
-    '{"steps": [{"skill": "<id>", "params": {...}, "why": "..."}], '
-    '"done_when": "..."}\n'
-    "Use only the skill ids provided. For each step, supply that skill's "
-    "required inputs (marked * in the brief) in params; reference an earlier "
-    "step's output with ${step_id.output}. If no skill applies, reply "
-    '{"steps": []}.'
-)
 
 
 def planning_brief(registry: SkillRegistry) -> str:
@@ -79,7 +68,7 @@ def make_planner_node(model, registry: SkillRegistry):
         if context:
             parts.append(context)
         reply = await model.ainvoke(
-            [SystemMessage(content=PLANNER_SYSTEM),
+            [SystemMessage(content=PROMPTS.text("planner")),
              HumanMessage(content="\n\n".join(parts))])
         text = message_text(reply)
 
