@@ -1,0 +1,31 @@
+id: audit_constraints
+version: 1
+kind: workflow
+description: >-
+  Check the dimensions and topology are self-consistent BEFORE building, and get
+  the user's confirmation of the numbers.
+
+io:
+  inputs:
+    - {name: constraints, type: "list[str]", required: true}
+    - {name: topology, type: text, required: true}
+  outputs:
+    - {name: approved, type: bool}
+
+steps:
+  - {check: "do the stated dimensions add up (features fit inside the material)?"}
+  - {check: "is any feature larger than the part, or outside it?"}
+  - {check: "is any required dimension still missing?"}
+  - {present: "show the numbered constraints and assumptions to the user and ask them to confirm or correct"}
+
+cautions:
+  - >-
+    A feature that cannot fit (a 12 mm hole in a 10 mm plate, a pocket deeper
+    than the material) is a contradiction in the reading of the drawing -- resolve
+    it with the user rather than silently clamping it.
+
+success_criteria:
+  - "no contradictions remain, and the user has approved the numbers"
+
+abort_criteria:
+  - "a contradiction cannot be resolved from the reference: ask the user, do not guess"

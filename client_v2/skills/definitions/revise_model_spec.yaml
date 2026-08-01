@@ -1,0 +1,53 @@
+id: revise_model_spec
+version: 1
+kind: tool-wrapper
+description: >-
+  Change an existing spec-built model with a SMALL list of edits and rebuild it,
+  instead of re-specifying the whole thing.
+
+io:
+  inputs:
+    - {name: name, type: string, required: true}
+    - name: edits
+      type: >-
+        [{"action": "move"|"update"|"add"|"remove", "name": str,
+        "delta": [x,y,z] (move), "part": {...} (add), plus any of center /
+        size / height / radius / op / shape (update)}]
+      unit: mm
+      required: true
+  outputs:
+    - {name: report, type: text}
+    - {name: check_renders, type: "list[path]"}
+
+preconditions:
+  - "a saved spec exists for this name (build it with build_model_spec first)"
+
+dependencies:
+  - edit_build
+
+steps:
+  - {call: edit_build, with: {name: "${name}", edits: "${edits}"}}
+
+examples:
+  - input: {name: bracket, edits: [{action: move, name: hole_yz, delta: [0, -5, 0]}]}
+    output: {report: "Edited 'bracket.r' (1 op(s))"}
+
+cautions:
+  - >-
+    The edit key is "action"; a part's own "op" is its boolean role (add /
+    subtract) and must not be overwritten by it.
+  - >-
+    Send only what changes. Re-sending the whole model risks dropping parts you
+    did not mean to touch.
+  - >-
+    Never fix a spec-built model with raw kill/r commands -- that bypasses the
+    saved spec, so undo_build can no longer recover it.
+
+success_criteria:
+  - "the rebuild succeeds and re-verification passes"
+
+recovery_actions:
+  - "undo_build ${name}   # step back to the previous saved version"
+
+effects:
+  - "rebuilds region ${name}.r and saves a new spec version"

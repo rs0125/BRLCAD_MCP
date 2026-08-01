@@ -1,0 +1,91 @@
+id: build_model_spec
+version: 1
+kind: skill
+description: >
+  Turn an approved dimensioned CSG plan into a BRL-CAD region via
+  build_from_spec, and render the requested check views.
+
+io:
+  inputs:
+    # Exact vocabulary matters -- the schema is spelled out here so a planner
+    # never has to invent field names (parts/shape/center, NOT primitives/
+    # type/base).
+    - name: spec
+      type: >-
+        {"name": str, "color": [r,g,b]?, "render_size": int?,
+        "views": [ "iso"|"iso2"|"front"|"back"|"side"|"side2"|"top"|"bottom" ]?,
+        "expect_bbox": [Lx,Ly,Lz]? (the overall size you intend --
+        the build is REJECTED if the parts do not produce it), "parts": [{"name": str, "shape":
+        "box"|"cylinder"|"sphere", "op": "add"|"subtract", "center": [x,y,z],
+        "size": [x,y,z] (box), "height": [x,y,z] (cylinder axis), "radius":
+        float (cylinder/sphere), "hole": "through"|"pocket" (subtract only --
+        say whether the cavity exits the far face or is a blind recess)}]}
+      unit: mm
+      required: true
+  outputs:
+    - {name: region, type: string}
+    - {name: check_renders, type: "list[path]"}
+
+preconditions:
+  - "units == mm"
+  - "spec validates against the BuildSpec schema"
+  - "region name is free OR owned by this workflow"
+
+dependencies:
+  - build_from_spec
+
+steps:
+  - {call: build_from_spec, with: {spec: "${spec}"}}
+  - {bind: {region: "${result.region}", check_renders: "${result.renders}"}}
+
+examples:
+  - input:
+      spec:
+        name: washer
+        views: [iso, top]
+        parts:
+          - {name: outer, shape: cylinder, op: add, center: [0, 0, 0],
+             height: [0, 0, 4], radius: 12}
+          - {name: bore, shape: cylinder, op: subtract, center: [0, 0, -1],
+             height: [0, 0, 6], radius: 6}
+    output: {region: "washer.r"}
+
+cautions:
+  - >-
+    Do not set "lighting" on a spec: check views are always rendered with flat
+    ambient light so repeated features stay countable. Lit or beauty renders are
+    a separate job (render_model / render_previews).
+  - >-
+    When the request states an overall size or a coordinate range, set
+    expect_bbox to it. The build is rejected if the parts do not add up to that,
+    which catches a model shifted outside the intended range before any geometry
+    is created.
+  - >-
+    A THROUGH-HOLE cutter must start OUTSIDE the material and exit past the far
+    face. Put its centre a millimetre or two beyond the near face and make its
+    height longer than the material it crosses (e.g. to bore through a cube
+    spanning X -15..15, use center [-20,0,0] with height [40,0,0] -- NOT
+    center [0,0,0], which starts mid-material and leaves a blind pocket).
+  - >-
+    A cutter that deliberately stops inside the material is a blind pocket, not
+    a through-hole. That is legitimate when the user asked for a recess of a
+    given depth -- set hole: pocket on it and size it so the intended depth is
+    removed (e.g. a 2 mm deep recess in a 5 mm plate leaves 3 mm behind).
+    Mark real holes hole: through so a wrong one is caught.
+  - "Multi-add-then-subtract regions must fold left-to-right (r-binding gotcha)."
+
+success_criteria:
+  - "region exists (l ${region} succeeds)"
+  - "feature count matches the spec"
+
+abort_criteria:
+  - "build_from_spec returns an error"
+  - "more than N retries without progress"
+
+recovery_actions:
+  - "undo_build ${region}   # spec-backed revert"
+  - "restore_backup         # raw-edit fallback"
+
+effects:
+  - "creates region ${region}.r and its solids in the open .g"
+  - "writes a versioned spec under specs/${name}/"

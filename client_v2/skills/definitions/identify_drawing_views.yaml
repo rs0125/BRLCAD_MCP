@@ -1,0 +1,22 @@
+id: identify_drawing_views
+version: 1
+kind: skill
+description: >-
+  Work out which views the reference shows (front / side / top / isometric) and
+  which axis each maps to, so later dimensions are applied to the right axis.
+
+io:
+  inputs:
+    - {name: reference, type: "image|text", required: true}
+  outputs:
+    - {name: views, type: "list[str]"}
+    - {name: axis_mapping, type: text}
+
+cautions:
+  - >-
+    A single isometric view cannot fix all three axes on its own; say which
+    extents are ambiguous rather than guessing a depth.
+  - "Model in millimetres with Z up unless the reference clearly implies otherwise."
+
+success_criteria:
+  - "each identified view is mapped to a model axis"

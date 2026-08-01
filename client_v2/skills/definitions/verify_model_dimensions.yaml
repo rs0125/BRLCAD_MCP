@@ -1,0 +1,35 @@
+id: verify_model_dimensions
+version: 1
+kind: tool-wrapper
+description: >
+  Objectively verify a built region matches its spec using BRL-CAD's own
+  analysers (bb + nirt) -- NOT a render. Checks existence, bounding box, and
+  that every cylindrical hole actually goes through.
+
+io:
+  inputs:
+    - {name: spec, type: BuildSpec, unit: mm, required: true}
+  outputs:
+    - {name: verdict, type: text}
+
+preconditions:
+  - "the region named in the spec has already been built"
+
+dependencies:
+  - verify_model_dimensions
+
+steps:
+  - {call: verify_model_dimensions, with: {spec: "${spec}"}}
+
+cautions:
+  - "Engine truth, not vision: a hole hidden by camera angle still passes, and a hole that failed to cut is caught -- unlike a render."
+  - "The through-hole ray check assumes cylindrical subtracts are through-holes, not blind pockets."
+
+success_criteria:
+  - "verdict starts with 'Verification ... : PASS'"
+
+abort_criteria:
+  - "any engine-truth check fails -> kick back to the planner to revise the spec"
+
+recovery_actions:
+  - "revise_model_spec (edit_build) then re-verify"

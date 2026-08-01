@@ -1,0 +1,31 @@
+id: render_orthographic_checks
+version: 1
+kind: skill
+description: >
+  Render front/side/top (and an iso) check views of a region so it can be
+  compared to a reference, using the socket-based render tools.
+
+io:
+  inputs:
+    - {name: region, type: string, required: true}
+    - {name: views, type: "list[string]", required: false}
+  outputs:
+    - {name: renders, type: "list[path]"}
+
+preconditions:
+  - "region exists in the open .g"
+
+dependencies:
+  - render_previews
+
+steps:
+  - {call: render_previews, with: {obj: "${region}", variants: "front:studio,side:studio,top:studio,iso:studio"}}
+
+cautions:
+  - "A concave part can occlude a real feature from an outside-corner view; pick an angle that reveals it before concluding a feature is missing."
+
+success_criteria:
+  - "one PNG produced per requested view"
+
+effects:
+  - "writes PNGs under a timestamped previews folder"

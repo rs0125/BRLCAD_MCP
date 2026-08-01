@@ -1,0 +1,65 @@
+id: model_from_dimensioned_sketch
+version: 1
+kind: workflow
+description: >
+  Given a dimensioned reference (image and/or text), produce a verified BRL-CAD
+  model and orthographic check renders.  The target demonstration workflow.
+
+io:
+  inputs:
+    - {name: reference, type: "image|text", required: true}
+    - {name: constraints, type: text, required: false}
+  outputs:
+    - {name: region, type: string}
+    - {name: report, type: text}
+
+dependencies:
+  - ingest_drawing
+  - identify_drawing_views
+  - extract_dimension_constraints
+  - resolve_feature_topology
+  - audit_constraints
+  - plan_csg_features
+  - build_model_spec
+  - verify_model_dimensions
+  - render_orthographic_checks
+  - revise_model_spec
+  - promote_draft
+
+steps:
+  - {understand: [ingest_drawing, identify_drawing_views]}
+  - {plan: [extract_dimension_constraints, resolve_feature_topology, audit_constraints, plan_csg_features]}
+  - {authorize: "confirm the dimensioned plan with the user"}
+  - {execute: [build_model_spec]}
+  - {verify: [verify_model_dimensions, render_orthographic_checks]}
+  - {iterate: "on verify-fail -> revise_model_spec -> re-verify (bounded rounds)"}
+  - {report: [promote_draft]}
+
+cautions:
+  - >-
+    HONOUR ANY STATED PLACEMENT EXACTLY. If the request fixes where the part sits
+    ("occupies 0..50 mm in X, Y and Z", "centred on the origin", "this face on
+    the X=0 plane"), derive every part centre from that and check the finished
+    bounding box against it BEFORE building -- do not re-choose a placement that
+    seems more natural. Material must lie inside the stated range, not straddle
+    its boundary: an L-bracket asked to span 0..50 mm was built at -2.5..50,
+    giving a 52.5 mm footprint instead of 50 mm.
+  - >-
+    Declare the intended overall size as expect_bbox on the spec; the build is
+    rejected if the parts do not produce it, so a placement mistake is caught
+    before anything is built.
+  - >-
+    A drawing rarely says whether a length is an inner or an outer dimension. If
+    the request states the overall size, make the OUTER extents match it.
+
+success_criteria:
+  - "verify_model_dimensions passes within tolerance"
+  - "feature count and topology match the audited plan"
+
+abort_criteria:
+  - "audit_constraints finds an unresolvable contradiction"
+  - "iterate exceeds max rounds without convergence"
+
+recovery_actions:
+  - "revise_model_spec (edit_build)"
+  - "undo_build / restore_backup"

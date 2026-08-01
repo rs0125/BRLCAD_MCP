@@ -1,0 +1,25 @@
+id: promote_draft
+version: 1
+kind: skill
+description: >-
+  Finish the job: report the verified model, its dimensions, the check renders,
+  and every assumption that went into it.
+
+io:
+  inputs:
+    - {name: region, type: string, required: true}
+    - {name: assumptions, type: "list[str]", required: false}
+  outputs:
+    - {name: report, type: text}
+
+preconditions:
+  - "verify_model_dimensions has passed for the region"
+
+cautions:
+  - >-
+    Repeat the assumptions in the final report. A model built on an assumed
+    scale is only trustworthy if the reader knows which numbers were assumed.
+  - "Never describe an unverified or failed build as finished."
+
+success_criteria:
+  - "states the region name, its key dimensions, the render paths, and the assumptions"

@@ -3,7 +3,12 @@
 from brlcad_mcp.config import BRLCADConfig, LLMConfig, ServerConfig, Settings
 
 
-def test_default_brlcad_config():
+def test_default_brlcad_config(monkeypatch):
+    # Hermetic: an exported BRLCAD_* in the developer's shell (e.g. pointing at a
+    # test listener on another port) must not make this fail.
+    for var in ("BRLCAD_HOST", "BRLCAD_PORT", "BRLCAD_TIMEOUT",
+                "BRLCAD_BUFFER_SIZE"):
+        monkeypatch.delenv(var, raising=False)
     cfg = BRLCADConfig()
     assert cfg.host == "127.0.0.1"
     assert cfg.port == 5555

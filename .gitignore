@@ -429,3 +429,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local design notes (not for the repo)
+client_v2/DESIGN.md

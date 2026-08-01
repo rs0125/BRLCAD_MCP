@@ -1,0 +1,89 @@
+id: render_beauty
+version: 1
+kind: workflow
+description: >-
+  Produce a presentation-quality render of an existing model, staged cheap-first:
+  a small preview, then a lighting comparison, then the finished studio render.
+
+io:
+  inputs:
+    - {name: obj, type: string, required: true}
+    - name: view
+      type: '"iso"|"iso2"|"iso_back"|"iso_back2"|"front"|"back"|"side"|"side2"|"top"|"bottom"'
+      required: false
+    - {name: constraints, type: text, required: false}
+  outputs:
+    - {name: final_render, type: path}
+    - {name: settings, type: text}
+
+preconditions:
+  - "the object exists in the open database (check with ls or l)"
+
+dependencies:
+  - render_previews
+  - render_model
+
+# Staged deliberately: a full render is slow, so the cheap stages exist to settle
+# framing and lighting BEFORE paying for the expensive one.  Each stage ends by
+# handing images to the user -- do not run the next stage until they answer.
+steps:
+  - stage: framing
+    call: render_previews
+    with: {obj: "${obj}", variants: "${view}:studio", size: 192,
+           ambient_samples: 0, quality: draft}
+    then: "show the stamp and ask the user to confirm the framing, or name a different view"
+  - stage: lighting
+    call: render_previews
+    with: {obj: "${obj}", variants: "${view}:studio,${view}:model,${view}:ambient",
+           size: 400, ambient_samples: 64, quality: draft}
+    then: "show the A/B/C legend and ask the user which lighting they want"
+  - stage: final
+    call: render_model
+    # Pass the lighting the user picked in the previous stage (studio if they
+    # did not express a preference).  Omit an argument rather than sending null.
+    with: {obj: "${obj}", view: "${view}", lighting: studio,
+           size: 800, ambient_samples: 64, quality: clean}
+    then: "give the user the final image path and the settings used"
+
+examples:
+  - input: {obj: "bracket.r", view: "iso"}
+    output: {final_render: "~/brlcad_renders/bracket.r_iso_35_25_studio.png"}
+
+cautions:
+  - >-
+    Do NOT jump straight to the final render. It is the slow step, and rendering
+    it before the user has confirmed framing and lighting usually means rendering
+    it twice.
+  - >-
+    EXCEPTION: if the user explicitly asks to skip the preview ("just render it",
+    "render directly", "quick render"), go straight to the final stage.
+  - >-
+    Stop and wait after each stage. These stages exist to collect a decision; a
+    stamp nobody looked at is wasted work.
+  - >-
+    The three lighting modes differ in kind, not quality: studio is a
+    camera-relative rig (every angle lit the same), model is world-fixed (angles
+    lit from different sides, a fixed-sun look), ambient is flat and even. Let the
+    user choose rather than assuming studio.
+  - >-
+    Render the final stage with whichever lighting the user picked in the
+    lighting stage. Omit any argument you have no value for -- do not send null.
+  - >-
+    Honour any stated constraints -- a specific colour, a particular view, a
+    required size -- over these defaults.
+  - >-
+    This renders an EXISTING model. It does not create or modify geometry; if the
+    model is wrong, fix it first with revise_model_spec.
+
+success_criteria:
+  - "the user confirmed framing and lighting before the final render"
+  - "a clean full-size render exists at the returned path"
+
+abort_criteria:
+  - "the object does not exist -- say so instead of rendering an empty scene"
+  - "a render fails twice with the same error: report it rather than retrying blindly"
+
+effects:
+  - "writes preview stamps to a timestamped previews folder"
+  - "writes the final PNG into the render directory"
+  - "leaves the object drawn and the listener's current view changed"

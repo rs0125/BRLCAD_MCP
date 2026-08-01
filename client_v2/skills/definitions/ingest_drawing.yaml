@@ -1,0 +1,30 @@
+id: ingest_drawing
+version: 1
+kind: skill
+description: >-
+  Read an attached reference image (photo or dimensioned drawing) and describe
+  what the part is, without inventing numbers.
+
+io:
+  inputs:
+    - {name: reference, type: "image|text", required: true}
+  outputs:
+    - {name: description, type: text}
+    - {name: dimensioned, type: bool}
+
+preconditions:
+  - "an image is attached to the conversation, or the part is described in text"
+
+cautions:
+  - >-
+    Report only what is visible. If a dimension is not printed on the drawing,
+    say it is not specified rather than estimating it here -- estimation happens
+    later, once, and must be visible to the user.
+  - >-
+    Say explicitly whether the reference is DIMENSIONED (numbers printed on it)
+    or an undimensioned photo, because that decides whether a scale assumption
+    is needed at all.
+
+success_criteria:
+  - "names the part and lists the features visible in the reference"
+  - "states whether printed dimensions are present"

@@ -1,0 +1,31 @@
+id: resolve_feature_topology
+version: 1
+kind: skill
+description: >-
+  Decide how the features relate: which faces meet, what is a through-hole
+  versus a pocket, and where each feature sits relative to the part's origin.
+
+io:
+  inputs:
+    - {name: constraints, type: "list[str]", required: true}
+    - {name: description, type: text, required: false}
+  outputs:
+    - {name: topology, type: text}
+
+cautions:
+  - >-
+    If the request states where the part sits (a coordinate range, or which faces
+    lie on which planes), take that as given and derive every part's centre from
+    it -- do not re-choose a placement that seems more natural. Material must lie
+    INSIDE the stated range, not straddle its boundary.
+  - >-
+    Fix the origin explicitly and place every feature relative to it. Centring
+    each part on the origin by mistake turns an L-bracket into a cross: two
+    plates that should meet at a corner end up crossing through each other.
+  - >-
+    State for each cavity whether it is a THROUGH-hole or a blind POCKET; that
+    intent cannot be recovered from geometry later.
+
+success_criteria:
+  - "the origin is stated, and every feature is located relative to it"
+  - "each cavity is labelled through or pocket"

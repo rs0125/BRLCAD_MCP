@@ -15,6 +15,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env")
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Parse a truthy/falsy environment variable (1/true/yes/on)."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass(frozen=True)
 class BRLCADConfig:
     """Settings for the BRL-CAD TCP socket bridge."""
@@ -98,6 +106,8 @@ class Settings:
     llm: LLMConfig = field(default_factory=LLMConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     render: RenderConfig = field(default_factory=RenderConfig)
+    # client-v2: when true, the REPL streams a per-node agent trace.
+    debug: bool = field(default_factory=lambda: _env_bool("CLIENT_V2_DEBUG"))
 
 
 # Module-level singleton — import and use directly

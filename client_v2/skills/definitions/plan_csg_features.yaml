@@ -1,0 +1,42 @@
+id: plan_csg_features
+version: 1
+kind: skill
+description: >-
+  Turn approved dimensions and topology into an ordered CSG decomposition: which
+  primitives are added, which are subtracted, and in what order.
+
+io:
+  inputs:
+    - {name: constraints, type: "list[str]", required: true}
+    - {name: topology, type: text, required: true}
+  outputs:
+    - {name: spec, type: BuildSpec, unit: mm}
+
+dependencies:
+  - build_model_spec
+
+cautions:
+  - >-
+    HONOUR ANY STATED PLACEMENT EXACTLY. If the request gives a coordinate range
+    or origin ("occupies 0..50 mm in X, Y and Z", "centred on the origin"), the
+    finished model's bounding box must match it. Before writing the spec, add up
+    each part's extents and check the total against the stated range -- a part
+    placed at a negative centre when 0..50 was asked for silently shifts the
+    whole model and changes its overall size (an L-bracket asked to span 0..50
+    was built at -2.5..50, a 52.5 mm footprint).
+  - >-
+    The first part must be an add: a region has to start from solid, not from a
+    subtraction.
+  - >-
+    Order matters -- operations fold left to right, so a part added AFTER a cut
+    refills it. Put the solids first, then the cavities.
+  - >-
+    A through-hole cutter must start OUTSIDE the material and exit past the far
+    face; size a pocket so the intended depth is removed and mark it
+    hole: pocket.
+  - >-
+    Model a hollow body as the outer solid minus a slightly smaller inner solid,
+    not as walls assembled by hand.
+
+success_criteria:
+  - "the spec validates, and every constraint maps to a part or a dimension of one"

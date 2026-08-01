@@ -1,0 +1,31 @@
+id: extract_dimension_constraints
+version: 1
+kind: skill
+description: >-
+  Pull every printed dimension off the reference into an explicit list of
+  numbered constraints in millimetres.
+
+io:
+  inputs:
+    - {name: reference, type: "image|text", required: true}
+    - {name: axis_mapping, type: text, required: false}
+  outputs:
+    - {name: constraints, type: "list[str]"}
+    - {name: assumptions, type: "list[str]"}
+
+cautions:
+  - >-
+    Keep MEASURED and ASSUMED values in separate lists. A number the user can
+    check is worth far more than a confident guess, and a wrong assumption that
+    looks measured is the hardest error to find later.
+  - >-
+    A diameter is not a radius. Record what the drawing says (e.g. "12 mm
+    diameter hole") and halve it only when writing the spec.
+  - >-
+    For an undimensioned photo, take ONE real dimension from the user or from a
+    known standard part, then derive the rest by proportion -- and list every
+    derived value as an assumption.
+
+success_criteria:
+  - "every printed dimension appears in constraints, in mm"
+  - "everything not printed appears in assumptions"
