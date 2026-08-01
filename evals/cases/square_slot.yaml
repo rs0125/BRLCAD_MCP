@@ -1,0 +1,19 @@
+# A BOX subtract: previously unverified entirely, so a square hole that failed
+# to cut through would pass silently.
+id: square_slot
+prompt: >-
+  Build a plate named ev_slot: a 20 x 20 x 5 mm box centred at the origin with a
+  6 x 6 mm square hole cut all the way through its thickness at the centre.
+spec:
+  name: ev_slot
+  views: []
+  parts:
+    - {name: body, shape: box, op: add, center: [0, 0, 0], size: [20, 20, 5]}
+    - {name: slot, shape: box, op: subtract, center: [0, 0, 0],
+       size: [6, 6, 20], hole: through}
+expect:
+  bbox: [20, 20, 5]
+  rays:
+    - {desc: square hole is open, start: [0, 0, 50], dir: [0, 0, -1], expect: miss}
+    - {desc: plate solid beside the slot, start: [8, 0, 50], dir: [0, 0, -1],
+       expect: hit, los: 5}

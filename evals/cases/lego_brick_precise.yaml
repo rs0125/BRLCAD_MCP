@@ -1,0 +1,32 @@
+# Multi-view engineering drawing of a 2x4 brick (lego2.jpg), fully dimensioned:
+# 31.8 x 15.8 x 9.6 body, 8 studs of 4.8 dia x 1.8 tall at 8 mm pitch, 3.9 from
+# the edges.  Tests counting EIGHT additive features and placing them on a grid.
+id: lego_brick_precise
+image: ~/Downloads/test_brlcad_images/lego2.jpg
+prompt: >-
+  Model the Lego brick in this engineering drawing, named ev_lego_brick, using
+  the precise dimensions printed on it. Model the outer body as one solid block
+  spanning 0..31.8 mm in X, 0..15.8 mm in Y and 0..9.6 mm in Z, and add all of
+  the studs on the top face at the pitch and offsets shown. Ignore the hollow
+  underside and the internal tubes -- model the body as solid. The dimensions are
+  already approved; build it now, then verify it.
+expect:
+  dimensions: ["31.8", "15.8", "9.6", "4.8", "8"]
+  bbox: [31.8, 15.8, 11.4]
+  rays:
+    - {desc: a stud plus the body, start: [3.9, 3.9, 60], dir: [0, 0, -1], expect: hit, los: 11.4}
+    - {desc: body only between studs, start: [7.9, 7.9, 60], dir: [0, 0, -1], expect: hit, los: 9.6}
+spec:
+  name: ev_lego_brick
+  views: []
+  expect_bbox: [31.8, 15.8, 11.4]
+  parts:
+    - {name: body, shape: box, op: add, center: [15.9, 7.9, 4.8], size: [31.8, 15.8, 9.6]}
+    - {name: s11, shape: cylinder, op: add, center: [3.9, 3.9, 9.6], height: [0, 0, 1.8], radius: 2.4}
+    - {name: s21, shape: cylinder, op: add, center: [11.9, 3.9, 9.6], height: [0, 0, 1.8], radius: 2.4}
+    - {name: s31, shape: cylinder, op: add, center: [19.9, 3.9, 9.6], height: [0, 0, 1.8], radius: 2.4}
+    - {name: s41, shape: cylinder, op: add, center: [27.9, 3.9, 9.6], height: [0, 0, 1.8], radius: 2.4}
+    - {name: s12, shape: cylinder, op: add, center: [3.9, 11.9, 9.6], height: [0, 0, 1.8], radius: 2.4}
+    - {name: s22, shape: cylinder, op: add, center: [11.9, 11.9, 9.6], height: [0, 0, 1.8], radius: 2.4}
+    - {name: s32, shape: cylinder, op: add, center: [19.9, 11.9, 9.6], height: [0, 0, 1.8], radius: 2.4}
+    - {name: s42, shape: cylinder, op: add, center: [27.9, 11.9, 9.6], height: [0, 0, 1.8], radius: 2.4}

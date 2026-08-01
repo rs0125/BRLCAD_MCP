@@ -1,0 +1,15 @@
+id: washer
+prompt: >-
+  Build a washer named ev_washer: an outer cylinder of radius 12 and height 4
+  along +Z starting at the origin, with a 12 mm diameter hole through its axis.
+spec:
+  name: ev_washer
+  views: []
+  parts:
+    - {name: outer, shape: cylinder, op: add, center: [0, 0, 0], height: [0, 0, 4], radius: 12}
+    - {name: bore, shape: cylinder, op: subtract, center: [0, 0, -1], height: [0, 0, 6], radius: 6}
+expect:
+  bbox: [24, 24, 4]
+  rays:
+    - {desc: axis is open, start: [0, 0, 50], dir: [0, 0, -1], expect: miss}
+    - {desc: ring has material, start: [9, 0, 50], dir: [0, 0, -1], expect: hit, los: 4}

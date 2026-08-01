@@ -1,0 +1,29 @@
+# A HAND-DRAWN dimensioned sketch on lined paper (birthdaycake.jpg) -- the
+# hardest reference here, and the truest example of "model from a dimensioned
+# sketch": two views (front elevation and plan) of a two-tier cake with candles.
+# The sketch carries no units, so the prompt fixes them as millimetres.
+id: cake_hand_sketch
+image: ~/Downloads/test_brlcad_images/birthdaycake.jpg
+prompt: >-
+  This hand-drawn sketch shows a two-tier cake in front view and plan view.
+  Model it in BRL-CAD, named ev_cake, treating every number on the sketch as
+  millimetres. From the plan view the tiers are round. Build the lower tier as a
+  cylinder on the Z axis with its base at the origin, the upper tier as a
+  cylinder centred on it and sitting on top, and the two candles as thin
+  cylinders standing on the upper tier, spaced apart as the plan view shows. The
+  dimensions are already approved; build it now, then verify it.
+expect:
+  dimensions: ["10", "6", "5", "2", "0.5"]
+  bbox: [10, 10, 12]
+  rays:
+    - {desc: both tiers on the axis, start: [0, 0, 60], dir: [0, 0, -1], expect: hit, los: 10}
+    - {desc: "lower tier only (beyond the upper tier)", start: [4, 0, 60], dir: [0, 0, -1], expect: hit, los: 5}
+spec:
+  name: ev_cake
+  views: []
+  expect_bbox: [10, 10, 12]
+  parts:
+    - {name: lower_tier, shape: cylinder, op: add, center: [0, 0, 0], height: [0, 0, 5], radius: 5}
+    - {name: upper_tier, shape: cylinder, op: add, center: [0, 0, 5], height: [0, 0, 5], radius: 3}
+    - {name: candle_a, shape: cylinder, op: add, center: [-2, 0, 10], height: [0, 0, 2], radius: 0.25}
+    - {name: candle_b, shape: cylinder, op: add, center: [2, 0, 10], height: [0, 0, 2], radius: 0.25}

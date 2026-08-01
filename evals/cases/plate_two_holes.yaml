@@ -1,0 +1,18 @@
+id: plate_two_holes
+prompt: >-
+  Build a mounting plate named ev_plate: a 40 x 40 x 6 mm box centred at the
+  origin, with a 10 mm diameter hole through the centre and a 5 mm diameter hole
+  centred 12 mm from the origin along +X.
+spec:
+  name: ev_plate
+  views: []
+  parts:
+    - {name: body, shape: box, op: add, center: [0, 0, 0], size: [40, 40, 6]}
+    - {name: centre_hole, shape: cylinder, op: subtract, center: [0, 0, -4], height: [0, 0, 8], radius: 5}
+    - {name: offset_hole, shape: cylinder, op: subtract, center: [12, 0, -4], height: [0, 0, 8], radius: 2.5}
+expect:
+  bbox: [40, 40, 6]
+  rays:
+    - {desc: centre hole open, start: [0, 0, 50], dir: [0, 0, -1], expect: miss}
+    - {desc: offset hole open, start: [12, 0, 50], dir: [0, 0, -1], expect: miss}
+    - {desc: plate has material, start: [0, 15, 50], dir: [0, 0, -1], expect: hit, los: 6}

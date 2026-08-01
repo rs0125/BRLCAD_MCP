@@ -1,0 +1,24 @@
+# Dimensioned reference (lego.jpg): 15.8 x 7.8 x 3.2 mm plate, studs 4.8 mm dia
+# x 1.7 mm tall at 8 mm spacing.  Unlike the other cases the features here are
+# ADDITIVE (studs standing proud), not cavities.
+id: lego_plate_drawing
+image: ~/Downloads/test_brlcad_images/lego.jpg
+prompt: >-
+  The attached drawing dimensions two Lego pieces. Model ONLY the pink 1x2 plate,
+  named ev_lego_plate, using the dimensions printed for it. Place the plate body
+  spanning 0..15.8 mm in X, 0..7.8 mm in Y and 0..3.2 mm in Z, and put its two
+  studs on the top face, centred across the width and spaced by the dimension
+  shown. Then verify it.
+expect:
+  dimensions: ["15.8", "7.8", "3.2", "4.8", "1.7", "8"]
+  bbox: [15.8, 7.8, 4.9]
+  rays:
+    - {desc: stud plus body thickness, start: [3.9, 3.9, 50], dir: [0, 0, -1], expect: hit, los: 4.9}
+    - {desc: body only between the studs, start: [7.9, 3.9, 50], dir: [0, 0, -1], expect: hit, los: 3.2}
+spec:
+  name: ev_lego_plate
+  views: []
+  parts:
+    - {name: body, shape: box, op: add, center: [7.9, 3.9, 1.6], size: [15.8, 7.8, 3.2]}
+    - {name: stud_a, shape: cylinder, op: add, center: [3.9, 3.9, 3.2], height: [0, 0, 1.7], radius: 2.4}
+    - {name: stud_b, shape: cylinder, op: add, center: [11.9, 3.9, 3.2], height: [0, 0, 1.7], radius: 2.4}

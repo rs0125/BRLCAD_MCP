@@ -1,0 +1,18 @@
+id: flanged_bushing
+prompt: >-
+  Build a flanged bushing named ev_bushing: a body cylinder of radius 10 and
+  height 24 along +Z from the origin, a flange disc of radius 18 and height 4 at
+  the base, and a 12 mm diameter bore all the way through.
+spec:
+  name: ev_bushing
+  views: []
+  parts:
+    - {name: body, shape: cylinder, op: add, center: [0, 0, 0], height: [0, 0, 24], radius: 10}
+    - {name: flange, shape: cylinder, op: add, center: [0, 0, 0], height: [0, 0, 4], radius: 18}
+    - {name: bore, shape: cylinder, op: subtract, center: [0, 0, -1], height: [0, 0, 26], radius: 6}
+expect:
+  bbox: [36, 36, 24]
+  rays:
+    - {desc: bore is open, start: [0, 0, 60], dir: [0, 0, -1], expect: miss}
+    - {desc: body wall full height, start: [8, 0, 60], dir: [0, 0, -1], expect: hit, los: 24}
+    - {desc: flange only, start: [15, 0, 60], dir: [0, 0, -1], expect: hit, los: 4}

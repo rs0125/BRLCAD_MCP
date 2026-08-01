@@ -1,0 +1,23 @@
+# Regression guard for the BRL-CAD `r` operator-binding bug: two unioned plates
+# with one hole each.  A flat `r` binds both subtractions to the LAST plate, so
+# the first plate's hole silently vanishes -- this case catches that.
+id: l_bracket
+prompt: >-
+  Build an L-bracket named ev_bracket: two 50 x 50 x 2.5 mm plates meeting at 90
+  degrees along the vertical corner at the origin (one in the Y-Z plane, one in
+  the X-Z plane), each with a 12 mm diameter hole centred in its face.
+spec:
+  name: ev_bracket
+  views: []
+  parts:
+    - {name: plate_yz, shape: box, op: add, center: [1.25, 25, 25], size: [2.5, 50, 50]}
+    - {name: plate_xz, shape: box, op: add, center: [25, 1.25, 25], size: [50, 2.5, 50]}
+    - {name: hole_yz, shape: cylinder, op: subtract, center: [-2, 25, 25], height: [8, 0, 0], radius: 6}
+    - {name: hole_xz, shape: cylinder, op: subtract, center: [25, -2, 25], height: [0, 8, 0], radius: 6}
+expect:
+  bbox: [50, 50, 50]
+  rays:
+    - {desc: hole in YZ plate open, start: [50, 25, 25], dir: [-1, 0, 0], expect: miss}
+    - {desc: hole in XZ plate open, start: [25, 50, 25], dir: [0, -1, 0], expect: miss}
+    - {desc: YZ plate has material, start: [50, 10, 10], dir: [-1, 0, 0], expect: hit, los: 2.5}
+    - {desc: XZ plate has material, start: [10, 50, 10], dir: [0, -1, 0], expect: hit, los: 2.5}

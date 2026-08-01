@@ -1,0 +1,22 @@
+# Intent matters: this cavity must NOT go through.  Guards the false-failure
+# where every cylindrical subtract was assumed to be a through-hole.
+id: pocket_plate
+prompt: >-
+  Build a plate named ev_pocket: a 20 x 20 x 5 mm box centred at the origin,
+  with a 6 mm diameter recess in the top face that is only 2 mm deep -- it must
+  NOT go through the plate.
+spec:
+  name: ev_pocket
+  views: []
+  parts:
+    - {name: body, shape: box, op: add, center: [0, 0, 0], size: [20, 20, 5]}
+    - {name: recess, shape: cylinder, op: subtract, center: [0, 0, 0.5],
+       height: [0, 0, 5.5], radius: 3, hole: pocket}
+expect:
+  bbox: [20, 20, 5]
+  rays:
+    # 3 mm of the 5 mm plate must remain under the 2 mm pocket.
+    - {desc: material remains under the pocket, start: [0, 0, 50],
+       dir: [0, 0, -1], expect: hit, los: 3}
+    - {desc: plate is solid away from the pocket, start: [8, 0, 50],
+       dir: [0, 0, -1], expect: hit, los: 5}

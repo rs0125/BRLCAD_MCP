@@ -1,0 +1,15 @@
+id: cored_block
+prompt: >-
+  Build a cored block named ev_block: a 30 x 30 x 30 mm cube centred at the
+  origin with a 20 mm diameter hole bored all the way through along the X axis.
+spec:
+  name: ev_block
+  views: []
+  parts:
+    - {name: cube, shape: box, op: add, center: [0, 0, 0], size: [30, 30, 30]}
+    - {name: bore, shape: cylinder, op: subtract, center: [-20, 0, 0], height: [40, 0, 0], radius: 10}
+expect:
+  bbox: [30, 30, 30]
+  rays:
+    - {desc: bore open along X, start: [60, 0, 0], dir: [-1, 0, 0], expect: miss}
+    - {desc: solid above the bore, start: [60, 0, 12], dir: [-1, 0, 0], expect: hit, los: 30}

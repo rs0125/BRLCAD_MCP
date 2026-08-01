@@ -1,0 +1,27 @@
+# UNDIMENSIONED render (rubic.jpg).  Scale and groove size come from the prompt
+# (a standard 3x3 cube is 57 mm).  This is the BOX-subtract case: six slots, two
+# per axis, which the old cylinder-only cavity check could not verify at all.
+id: rubiks_cube_photo
+image: ~/Downloads/test_brlcad_images/rubic.jpg
+prompt: >-
+  Model the Rubik's cube in this image as a simplified solid, named
+  ev_rubiks_cube. Use a 57 mm cube centred on the origin, and cut the 3x3 grid
+  lines as straight slots 1.5 mm wide that pass all the way through: two slots
+  per axis, at plus and minus 9.5 mm from the centre on each axis. Do not model
+  individual cubelets or stickers. Then verify it.
+expect:
+  bbox: [57, 57, 57]
+  rays:
+    - {desc: a groove plane is cut away, start: [-9.5, 0, 60], dir: [0, 0, -1], expect: miss}
+    - {desc: a cubelet centre has material, start: [0, 0, 60], dir: [0, 0, -1], expect: hit}
+spec:
+  name: ev_rubiks_cube
+  views: []
+  parts:
+    - {name: cube, shape: box, op: add, center: [0, 0, 0], size: [57, 57, 57]}
+    - {name: slot_xa, shape: box, op: subtract, center: [-9.5, 0, 0], size: [1.5, 60, 60], hole: through}
+    - {name: slot_xb, shape: box, op: subtract, center: [9.5, 0, 0], size: [1.5, 60, 60], hole: through}
+    - {name: slot_ya, shape: box, op: subtract, center: [0, -9.5, 0], size: [60, 1.5, 60], hole: through}
+    - {name: slot_yb, shape: box, op: subtract, center: [0, 9.5, 0], size: [60, 1.5, 60], hole: through}
+    - {name: slot_za, shape: box, op: subtract, center: [0, 0, -9.5], size: [60, 60, 1.5], hole: through}
+    - {name: slot_zb, shape: box, op: subtract, center: [0, 0, 9.5], size: [60, 60, 1.5], hole: through}

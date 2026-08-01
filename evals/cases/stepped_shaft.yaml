@@ -1,0 +1,16 @@
+id: stepped_shaft
+prompt: >-
+  Build a stepped shaft named ev_shaft: a cylinder of radius 8 and height 30
+  along +Z from the origin, with a wider collar of radius 14 and height 6
+  starting 10 mm up from the base. No holes.
+spec:
+  name: ev_shaft
+  views: []
+  parts:
+    - {name: shaft, shape: cylinder, op: add, center: [0, 0, 0], height: [0, 0, 30], radius: 8}
+    - {name: collar, shape: cylinder, op: add, center: [0, 0, 10], height: [0, 0, 6], radius: 14}
+expect:
+  bbox: [28, 28, 30]
+  rays:
+    - {desc: shaft axis is solid, start: [0, 0, 60], dir: [0, 0, -1], expect: hit, los: 30}
+    - {desc: collar band only, start: [12, 0, 60], dir: [0, 0, -1], expect: hit, los: 6}

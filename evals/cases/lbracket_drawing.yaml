@@ -1,0 +1,41 @@
+# Image-to-CAD from a DIMENSIONED drawing (Lbracket.png: 50 mm flanges, 2.5 mm
+# material, 12 mm holes).
+#
+# Placement convention: the drawing's 50 mm is read as the INNER flange length,
+# with the inside corner at the origin and material lying outward (negative), so
+# the OUTER footprint is 50 + 2.5 = 52.5 mm.  Note the two flanges then meet only
+# along an edge, so a small corner block is needed to make the bracket one solid
+# piece -- that is part of the correct reading, not an extra.
+id: lbracket_drawing
+image: ~/Downloads/test_brlcad_images/Lbracket.png
+prompt: >-
+  Model the bracket in this drawing in BRL-CAD, named ev_draw_bracket, using the
+  dimensions printed on it. Treat the 50 mm as the inner length of each flange:
+  put the inside corner at the origin with the inner faces on the X=0 and Y=0
+  planes, the material lying outward, and the height along +Z. Centre a mounting
+  hole in each flange. The bracket must be ONE CONNECTED SOLID: placed that way
+  the two flanges meet only along an edge, so add the small corner block that
+  joins them. The dimensions are already approved -- do not stop to ask me to
+  confirm them; build it now, then verify it.
+expect:
+  dimensions: ["50", "2.5", "12"]
+  bbox: [52.5, 52.5, 50]
+  rays:
+    - {desc: hole through the Y-facing flange, start: [25, 50, 25], dir: [0, -1, 0], expect: miss}
+    - {desc: hole through the X-facing flange, start: [50, 25, 25], dir: [-1, 0, 0], expect: miss}
+    - {desc: Y-facing flange is 2.5 mm thick, start: [25, 50, 10], dir: [0, -1, 0], expect: hit, los: 2.5}
+    - {desc: X-facing flange is 2.5 mm thick, start: [50, 25, 10], dir: [-1, 0, 0], expect: hit, los: 2.5}
+spec:
+  name: ev_draw_bracket
+  views: []
+  expect_bbox: [52.5, 52.5, 50]
+  parts:
+    - {name: flange_x, shape: box, op: add, center: [25, -1.25, 25], size: [50, 2.5, 50]}
+    - {name: flange_y, shape: box, op: add, center: [-1.25, 25, 25], size: [2.5, 50, 50]}
+    # Without this the two flanges touch only along an edge and the bracket is
+    # two disconnected plates.
+    - {name: corner, shape: box, op: add, center: [-1.25, -1.25, 25], size: [2.5, 2.5, 50]}
+    - {name: hole_x, shape: cylinder, op: subtract, center: [25, -4, 25],
+       height: [0, 6, 0], radius: 6, hole: through}
+    - {name: hole_y, shape: cylinder, op: subtract, center: [-4, 25, 25],
+       height: [6, 0, 0], radius: 6, hole: through}

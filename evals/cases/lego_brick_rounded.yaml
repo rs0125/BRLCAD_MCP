@@ -1,0 +1,32 @@
+# The SAME 2x4 brick as lego_brick_precise, but the drawing (lego3.jpg) gives
+# rounded figures: 32 x 16 instead of 31.8 x 15.8.  A discrimination test: the
+# model must use the numbers on THIS drawing, not the Lego standard it may know.
+id: lego_brick_rounded
+image: ~/Downloads/test_brlcad_images/lego3.jpg
+prompt: >-
+  Model the Lego brick in this drawing, named ev_lego_round, using exactly the
+  dimensions printed on THIS drawing even if you know the real part differs.
+  Model the body as a solid block spanning 0..32 mm in X, 0..16 mm in Y and
+  0..9.6 mm in Z, and add the studs on the top face at the pitch shown, evenly
+  spaced and centred. The dimensions are already approved; build it now, then
+  verify it.
+expect:
+  dimensions: ["32", "16", "9.6", "4.8", "1.8", "8"]
+  bbox: [32, 16, 11.4]
+  rays:
+    - {desc: a stud plus the body, start: [4, 4, 60], dir: [0, 0, -1], expect: hit, los: 11.4}
+    - {desc: body only between studs, start: [8, 8, 60], dir: [0, 0, -1], expect: hit, los: 9.6}
+spec:
+  name: ev_lego_round
+  views: []
+  expect_bbox: [32, 16, 11.4]
+  parts:
+    - {name: body, shape: box, op: add, center: [16, 8, 4.8], size: [32, 16, 9.6]}
+    - {name: s11, shape: cylinder, op: add, center: [4, 4, 9.6], height: [0, 0, 1.8], radius: 2.4}
+    - {name: s21, shape: cylinder, op: add, center: [12, 4, 9.6], height: [0, 0, 1.8], radius: 2.4}
+    - {name: s31, shape: cylinder, op: add, center: [20, 4, 9.6], height: [0, 0, 1.8], radius: 2.4}
+    - {name: s41, shape: cylinder, op: add, center: [28, 4, 9.6], height: [0, 0, 1.8], radius: 2.4}
+    - {name: s12, shape: cylinder, op: add, center: [4, 12, 9.6], height: [0, 0, 1.8], radius: 2.4}
+    - {name: s22, shape: cylinder, op: add, center: [12, 12, 9.6], height: [0, 0, 1.8], radius: 2.4}
+    - {name: s32, shape: cylinder, op: add, center: [20, 12, 9.6], height: [0, 0, 1.8], radius: 2.4}
+    - {name: s42, shape: cylinder, op: add, center: [28, 12, 9.6], height: [0, 0, 1.8], radius: 2.4}
