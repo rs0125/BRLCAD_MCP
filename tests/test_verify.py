@@ -240,3 +240,72 @@ def test_missing_region_detected_when_l_returns_empty_success():
     name, ok, detail = checks[0]
     assert name == "exists" and not ok
     assert "not in the database" in detail
+
+
+# --- our own verifier was littering the database ---------------------------
+
+def test_ray_artifacts_are_recognised():
+    assert V.is_ray_artifact("query_rayffff")
+    assert V.is_ray_artifact("query_ray0001")
+    assert not V.is_ray_artifact("plate.r")
+    assert not V.is_ray_artifact("query_result.s")
+
+
+def test_ray_artifacts_are_cleaned_up_after_a_sweep():
+    """nirt leaves a query_ray* object per ray, so verification -- the tool whose
+    job is telling the truth about a database -- was quietly littering it."""
+    seen = []
+
+    def prober(cmd):
+        seen.append(cmd)
+        if cmd.startswith("ls query_ray"):
+            return "SUCCESS: query_rayffff query_ray0002"
+        return "SUCCESS:"
+
+    removed = V.cleanup_ray_artifacts(prober)
+    assert removed == ["query_ray0002", "query_rayffff"]
+    assert any(c.startswith("kill ") and "query_rayffff" in c for c in seen)
+
+
+def test_cleanup_kills_nothing_when_there_are_no_artifacts():
+    calls = []
+
+    def prober(cmd):
+        calls.append(cmd)
+        return "SUCCESS:"
+
+    assert V.cleanup_ray_artifacts(prober) == []
+    assert not any(c.startswith("kill") for c in calls)
+
+
+def test_cleanup_never_kills_real_geometry():
+    def prober(cmd):
+        # A listener that ignores the glob and returns everything must not cause
+        # model geometry to be killed.
+        return ("SUCCESS: plate.r/R body.s query_rayffff"
+                if cmd.startswith("ls") else "SUCCESS:")
+
+    assert V.cleanup_ray_artifacts(prober) == ["query_rayffff"]
+
+
+def test_a_verify_run_tidies_up_after_itself():
+    spec = BuildSpec.model_validate({
+        "name": "w", "parts": [
+            {"name": "b", "shape": "box", "op": "add",
+             "center": [0, 0, 0], "size": [10, 10, 10]}]})
+    calls = []
+
+    def prober(cmd):
+        calls.append(cmd)
+        if cmd.startswith("l "):
+            return "SUCCESS: w.r: REGION\n   u b"
+        if cmd.startswith("bb"):
+            return ("SUCCESS: X Length: 10.0\nY Length: 10.0\nZ Length: 10.0")
+        if cmd.startswith("ls query_ray"):
+            return "SUCCESS: query_rayaaaa"
+        if cmd.startswith("nirt"):
+            return "SUCCESS: b (1 2 3)   10.0000  0.0000"
+        return "SUCCESS:"
+
+    V._verify(spec, prober)
+    assert any(c.startswith("kill ") and "query_ray" in c for c in calls)

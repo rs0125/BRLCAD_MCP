@@ -96,6 +96,14 @@ class RenderConfig:
     timeout: float = field(
         default_factory=lambda: float(os.getenv("BRLCAD_RENDER_TIMEOUT", "1800"))
     )
+    # Restore points for destructive raw edits.  Deliberately NOT under
+    # output_dir: they used to live in the render folder, so clearing a render
+    # cache silently deleted the only way back from a bad `kill`.
+    backup_dir: str = field(
+        default_factory=lambda: os.getenv(
+            "BRLCAD_BACKUP_DIR", os.path.expanduser("~/brlcad_backups")
+        )
+    )
 
 
 @dataclass(frozen=True)

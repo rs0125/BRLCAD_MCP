@@ -40,6 +40,7 @@ from brlcad_mcp.server.app import mcp
 from brlcad_mcp.server.tools.csg import expected_thickness
 from brlcad_mcp.server.tools.helpers import (
     is_error_response,
+    ls_names,
     parse_json_arg,
     parse_response,
 )
@@ -54,6 +55,8 @@ _BBOX_TOL_FRAC = 0.02
 # Thickness tolerance per ray: the larger of 0.5 mm or 2% of the expectation.
 _LOS_TOL_ABS = 0.5
 _LOS_TOL_FRAC = 0.02
+# nirt leaves a "query_ray<hex>" object in the database for every ray it fires.
+_RAY_ARTIFACT_PREFIX = "query_ray"
 # Grid resolution per axis for the background sweep (n x n rays per axis).
 _GRID = 3
 # How far off a cutter's centre to place its targeted edge samples, as a
@@ -242,6 +245,39 @@ def sample_rays(spec: BuildSpec) -> list[tuple[str, tuple, tuple]]:
 
 # --- verdict --------------------------------------------------------------
 
+def cleanup_ray_artifacts(prober) -> list[str]:
+    """Remove the ``query_ray*`` objects MGED's nirt leaves in the database.
+
+    Every ray we fire adds one, so verification -- the tool whose whole job is to
+    tell the truth about a database -- was quietly littering it.  The leftovers
+    cannot be read (``rt_db_get_internal(query_rayffff) failure``) and they make
+    ``ls`` non-empty forever, so "did we delete everything?" stops having an
+    honest answer.
+
+    Best effort, and the return value is what we ATTEMPTED, not what went away:
+    a leftover was observed surviving its own ``kill`` (the directory entry stays
+    with no valid internal representation), so a caller must not read this as
+    proof of a clean database.
+
+    :func:`is_ray_artifact` filters the kill list by name, which is the safety
+    property that matters here: if a listener ignores the ``query_ray*`` glob and
+    returns the whole database, we must not kill model geometry.
+    """
+    try:
+        listing = parse_response(prober(f"ls {_RAY_ARTIFACT_PREFIX}*"))
+    except (ConnectionError, TimeoutError):
+        return []
+    names = sorted(n for n in ls_names(listing) if is_ray_artifact(n))
+    if names:
+        prober(f"kill {' '.join(names)}")
+    return names
+
+
+def is_ray_artifact(name: str) -> bool:
+    """True for a nirt leftover, which is not model geometry."""
+    return name.startswith(_RAY_ARTIFACT_PREFIX)
+
+
 def _thickness_checks(spec: BuildSpec, prober, region: str):
     """Compare predicted vs measured thickness for every sample ray."""
     prober("zap")            # nirt sees the DISPLAYED objects, so isolate first
@@ -258,6 +294,8 @@ def _thickness_checks(spec: BuildSpec, prober, region: str):
             mismatches.append(
                 f"{label}: expected {want:.3g} mm of material, measured "
                 f"{got:.3g} mm")
+    # Tidy up after ourselves before returning a verdict on the database.
+    cleanup_ray_artifacts(prober)
     return total, mismatches
 
 

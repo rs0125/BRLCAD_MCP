@@ -27,9 +27,11 @@ from brlcad_mcp.config import settings
 from brlcad_mcp.server.app import mcp
 from brlcad_mcp.server.tools.helpers import (
     destructive_targets,
+    expand_targets,
     is_error_response,
     ls_names,
     parse_response,
+    removes_objects,
 )
 from brlcad_mcp.transport import send_command
 
@@ -41,6 +43,17 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _backups_root() -> str:
+    """Where restore points live (BRLCAD_BACKUP_DIR).
+
+    Its own directory, not a subfolder of the render output: clearing a render
+    cache must not take the only way back from a bad raw edit with it.  Any
+    pre-existing backups under the old location are still listed, below.
+    """
+    return settings.render.backup_dir
+
+
+def _legacy_backups_root() -> str:
+    """The previous location, still read so old restore points remain usable."""
     return os.path.join(settings.render.output_dir, "backups")
 
 
@@ -65,13 +78,12 @@ def _write_manifest(g_path: str, command: str, objects: list[str],
                    "objects": objects, "created": stamp}, fh, indent=2)
 
 
-def _list_manifests() -> list[dict]:
-    """All backup manifests, newest first (backup filenames sort chronologically)."""
-    root = _backups_root()
+def _read_manifests(root: str) -> list[dict]:
+    """Every manifest in one directory (unsorted); [] if it does not exist."""
     if not os.path.isdir(root):
         return []
     out: list[dict] = []
-    for name in sorted(os.listdir(root), reverse=True):
+    for name in sorted(os.listdir(root)):
         if not name.endswith(".json"):
             continue
         try:
@@ -82,9 +94,55 @@ def _list_manifests() -> list[dict]:
     return out
 
 
+def _list_manifests() -> list[dict]:
+    """All backup manifests, newest first.
+
+    Reads the legacy location too, so restore points made before backups moved
+    out of the render directory are still usable.  Each manifest records the
+    absolute path of its ``.g``, so a restore works wherever it was written.
+    Sorted on the recorded timestamp rather than filename, since two directories
+    are being merged.
+    """
+    roots = [_backups_root()]
+    legacy = _legacy_backups_root()
+    if os.path.abspath(legacy) != os.path.abspath(roots[0]):
+        roots.append(legacy)
+    manifests = [m for root in roots for m in _read_manifests(root)]
+    return sorted(manifests, key=lambda m: str(m.get("created", "")), reverse=True)
+
+
 # ---------------------------------------------------------------------------
 # Snapshot (called by execute_command before a destructive command runs)
 # ---------------------------------------------------------------------------
+
+def live_targets(command: str) -> list[str]:
+    """The objects currently in the database that *command* would destroy.
+
+    Globs are resolved against ``ls`` rather than compared to it -- see
+    :func:`expand_targets`.  Returns [] for a non-destructive command, and never
+    raises: this only ever informs a safety net.
+    """
+    try:
+        candidates = destructive_targets(command)
+        if not candidates:
+            return []
+        live = _parse_ls_names(parse_response(send_command("ls")))
+        return expand_targets(candidates, live)
+    except (ConnectionError, TimeoutError, OSError) as exc:
+        logger.warning("could not resolve destructive targets: %s", exc)
+        return []
+
+
+def survivors(objects: list[str]) -> list[str]:
+    """Which of *objects* are STILL in the database (for an after-the-fact check)."""
+    if not objects:
+        return []
+    try:
+        live = _parse_ls_names(parse_response(send_command("ls")))
+    except (ConnectionError, TimeoutError, OSError):
+        return []
+    return [o for o in objects if o in live]
+
 
 def maybe_snapshot(command: str) -> str | None:
     """Snapshot the existing objects *command* would destroy, if any.
@@ -94,11 +152,7 @@ def maybe_snapshot(command: str) -> str | None:
     Never raises -- a snapshot failure must not block the user's command.
     """
     try:
-        candidates = destructive_targets(command)
-        if not candidates:
-            return None
-        live = _parse_ls_names(parse_response(send_command("ls")))
-        objects = [c for c in candidates if c in live]
+        objects = live_targets(command)
         if not objects:
             return None  # nothing to lose (fresh create / already-gone names)
 
@@ -118,6 +172,35 @@ def maybe_snapshot(command: str) -> str | None:
     except (ConnectionError, TimeoutError, OSError) as exc:
         logger.warning("snapshot skipped: %s", exc)
         return None
+
+
+def describe_effect(objects: list[str], left: list[str]) -> str:
+    """Note describing what a destructive command actually removed (pure).
+
+    Empty when there was nothing to remove or everything went as asked.  MGED
+    can return SUCCESS for a command that changed nothing -- `kill *` did exactly
+    that -- so "no output" is not evidence of an effect.
+    """
+    if not objects or not left:
+        return ""
+    if len(left) == len(objects):
+        return (f"\n(WARNING: this command reported success but removed NOTHING "
+                f"-- all {len(objects)} named object(s) are still present. MGED "
+                f"may not expand wildcards here; try naming objects explicitly "
+                f"and confirm with ls.)")
+    return (f"\n(NOTE: {len(objects) - len(left)} of {len(objects)} object(s) "
+            f"were removed; still present: {', '.join(left[:8])}"
+            f"{' ...' if len(left) > 8 else ''}.)")
+
+
+def destructive_effect_note(command: str, targets: list[str]) -> str:
+    """Check after the fact whether a destructive command did what it claimed.
+
+    Only for verbs that actually delete objects -- see :data:`REMOVING_VERBS`.
+    """
+    if not removes_objects(command):
+        return ""
+    return describe_effect(targets, survivors(targets))
 
 
 # ---------------------------------------------------------------------------

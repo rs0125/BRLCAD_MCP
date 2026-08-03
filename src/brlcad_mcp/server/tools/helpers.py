@@ -8,6 +8,7 @@ into the prefix the tools below key off of.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import logging
 
@@ -43,9 +44,48 @@ DESTRUCTIVE_VERBS: set[str] = {
     "r", "c", "comb", "g",
 }
 
+# The subset that makes objects DISAPPEAR from the database, so "are they still
+# there?" is a valid after-the-fact check.  The others redefine (r/c/comb/g),
+# rename (mv/mvall), or remove a member from a combination (rm) -- for those the
+# named object is still expected to exist afterwards, and checking for its
+# absence would warn on every successful call.
+REMOVING_VERBS: set[str] = {"kill", "killall", "killtree"}
+
+
+def removes_objects(command: str) -> bool:
+    """True if *command*'s verb deletes objects outright."""
+    parts = command.strip().split()
+    return bool(parts) and parts[0].lower() in REMOVING_VERBS
+
 # Tokens that appear in these commands but are never object names: boolean/set
 # operators and combination flags.
 _NON_OBJECT_TOKENS: set[str] = {"u", "-", "+", "n"}
+
+
+_GLOB_CHARS = "*?["
+
+
+def expand_targets(candidates: list[str], live: set[str]) -> list[str]:
+    """Live object names *candidates* would hit, with globs expanded (pure).
+
+    A glob has to be resolved against the database, not compared to it: matching
+    a pattern literally against ``ls`` never hits, so a wildcard looked like
+    "nothing to lose" and the single most destructive command form -- `kill *` --
+    ran with NO snapshot behind it.  The command form that can destroy the most
+    was the one protected the least.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        matches = (sorted(n for n in live
+                          if fnmatch.fnmatchcase(n, candidate))
+                   if any(ch in candidate for ch in _GLOB_CHARS)
+                   else ([candidate] if candidate in live else []))
+        for name in matches:
+            if name not in seen:
+                seen.add(name)
+                out.append(name)
+    return out
 
 
 def _looks_numeric(token: str) -> bool:

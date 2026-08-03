@@ -20,7 +20,11 @@ from brlcad_mcp.server.tools.helpers import (
     is_error_response,
     parse_response,
 )
-from brlcad_mcp.server.tools.snapshots import maybe_snapshot
+from brlcad_mcp.server.tools.snapshots import (
+    destructive_effect_note,
+    live_targets,
+    maybe_snapshot,
+)
 from brlcad_mcp.transport import send_command
 
 logger = logging.getLogger(__name__)
@@ -77,6 +81,11 @@ def execute_command(
 
     # Snapshot existing objects a destructive command would delete/overwrite,
     # so a raw edit that goes wrong can be rolled back with restore_backup.
+    # `targets` is also what we check against afterwards: MGED reported SUCCESS
+    # for `kill *` while deleting nothing, and the agent only noticed by
+    # re-running `ls` itself.  A no-op reported as success is how an agent ends
+    # up telling the user it deleted something it did not.
+    targets = live_targets(command)
     snapshot_note = maybe_snapshot(command)
 
     try:
@@ -103,6 +112,7 @@ def execute_command(
 
     if snapshot_note:
         payload += snapshot_note
+    payload += destructive_effect_note(command, targets)
 
     return f"Command: {command}\nResult: {payload}"
 

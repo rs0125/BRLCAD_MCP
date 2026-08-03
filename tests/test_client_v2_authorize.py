@@ -5,7 +5,12 @@ from langchain_core.tools import tool
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
-from client_v2.agents.authorize import authorization_request, make_authorize_node
+from client_v2.agents.authorize import (
+    WIPE_QUESTION,
+    authorization_request,
+    broad_destructive,
+    make_authorize_node,
+)
 from client_v2.graph import build_graph
 from client_v2.skills import SkillDef, SkillRegistry
 from tests.v2_fakes import FakeToolCallingModel
@@ -111,3 +116,71 @@ async def test_an_ungated_plan_never_halts():
         {"configurable": {"thread_id": "nogate"}})
     assert not (out.get("__interrupt__") or ())
     assert out["authorized"] is True
+
+
+# --- a wholesale destructive request is gated even with no skill -----------
+
+def test_wipe_the_database_requests_are_recognised():
+    # THE BUG: "delete everything in this db" planned as {"steps": []}, so no
+    # skill could declare an authorize step, and a wipe ran with no confirmation.
+    for text in ("delete everything in this db",
+                 "clear the whole database",
+                 "wipe all objects",
+                 "remove all the models",
+                 "kill *",
+                 "reset the entire scene"):
+        assert broad_destructive(text), text
+
+
+def test_ordinary_edits_are_not_gated():
+    # Over-gating would nag on every edit, which trains people to say yes.
+    for text in ("delete the mounting hole",
+                 "remove the left stud",
+                 "erase bracket.r from the display",
+                 "build a 50 mm plate with two holes",
+                 "make the bore 6 mm",
+                 "render it from the top"):
+        assert not broad_destructive(text), text
+
+
+def test_a_destructive_verb_alone_is_not_enough():
+    assert not broad_destructive("delete hole_x.s")
+    assert not broad_destructive("show me everything in the db")   # no verb
+
+
+def test_the_gate_fires_with_an_empty_plan():
+    from client_v2.skills import SkillRegistry
+    registry = SkillRegistry({})
+    assert authorization_request({"steps": []}, registry,
+                                 "delete everything in this db") == WIPE_QUESTION
+    assert authorization_request({"steps": []}, registry, "build a plate") is None
+
+
+async def test_the_graph_actually_halts_on_a_wipe_request():
+    from langchain_core.messages import HumanMessage
+    from langchain_core.tools import tool
+
+    from client_v2.graph import build_graph
+    from client_v2.skills import SkillRegistry
+    from tests.v2_fakes import FakeToolCallingModel
+
+    @tool
+    def noop() -> str:
+        """Does nothing."""
+        return "ok"
+
+    graph = build_graph(
+        worker_model=FakeToolCallingModel(responses=[]),
+        planner_model=FakeToolCallingModel(
+            responses=[AIMessage(content='{"steps": []}')] * 4),
+        tools=[noop], worker_prompt="unused",
+        registry=SkillRegistry({}), classifier=lambda t: "work",
+        checkpointer=MemorySaver())
+
+    cfg = {"configurable": {"thread_id": "wipe"}}
+    result = await graph.ainvoke(
+        {"messages": [HumanMessage(content="delete everything in this db")]}, cfg)
+
+    pauses = result.get("__interrupt__") or ()
+    assert pauses, "a wipe-the-database request must not run unconfirmed"
+    assert "DESTROY" in str(pauses[0].value["authorize"])
