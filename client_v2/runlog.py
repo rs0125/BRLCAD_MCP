@@ -38,11 +38,20 @@ DEFAULT_LOG_DIR = os.path.expanduser(
 # Long strings are truncated: a log you cannot scroll through is not a log.
 _MAX_STR = 2000
 _DATA_URI = "data:image"
+# Depth is a runaway/cycle guard, NOT a size control -- that is what _MAX_STR and
+# _MAX_ITEMS are for.  It was 6, which is shallower than a real tool call: a spec
+# sits at reply -> tool_calls -> [0] -> args -> spec -> parts -> part, so a
+# 29-part build logged its geometry as ["<...>", ...].  The log recorded that a
+# build happened and its verdict, but not what was built -- the one thing you
+# open the log to find.
+_MAX_DEPTH = 24
+# Enough to hold a real parts list; a runaway sequence still cannot fill the disk.
+_MAX_ITEMS = 400
 
 
 def redact(value: Any, _depth: int = 0) -> Any:
     """JSON-safe copy of *value* with images redacted and long text truncated."""
-    if _depth > 6:
+    if _depth > _MAX_DEPTH:
         return "<...>"
     if isinstance(value, str):
         if _DATA_URI in value:
@@ -51,7 +60,10 @@ def redact(value: Any, _depth: int = 0) -> Any:
     if isinstance(value, dict):
         return {str(k): redact(v, _depth + 1) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        return [redact(v, _depth + 1) for v in value[:50]]
+        out = [redact(v, _depth + 1) for v in value[:_MAX_ITEMS]]
+        if len(value) > _MAX_ITEMS:
+            out.append(f"<+{len(value) - _MAX_ITEMS} more items>")
+        return out
     if isinstance(value, (int, float, bool)) or value is None:
         return value
     return redact(_describe(value), _depth + 1)

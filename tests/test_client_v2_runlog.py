@@ -42,8 +42,12 @@ def test_redaction_survives_odd_objects_and_deep_nesting():
     class Odd:
         pass
     assert isinstance(redact(Odd()), str)
+    # Ordinary nesting -- a spec inside tool args -- must come through INTACT.
+    # This used to assert that depth 7 was elided, which is precisely the bug:
+    # it pinned a cap shallower than a real tool call, so a build's geometry was
+    # logged as "<...>".  The cap is a cycle guard now, tested separately.
     deep = {"a": {"b": {"c": {"d": {"e": {"f": {"g": 1}}}}}}}
-    assert "<...>" in json.dumps(redact(deep))
+    assert redact(deep) == deep
 
 
 # --- the sink -------------------------------------------------------------
@@ -96,3 +100,60 @@ def test_model_calls_record_prompt_reply_and_usage(tmp_path):
     assert events[1]["reply"]["content"] == "a plan"
     assert events[1]["usage"]["total_tokens"] == 14
     assert "boom" in events[2]["error"]
+
+
+# --- the spec must survive redaction ---------------------------------------
+
+def test_a_nested_tool_spec_is_recorded_not_elided():
+    """THE BUG: the depth cap was 6, shallower than a real tool call.
+
+    A build spec sits at reply -> tool_calls -> [0] -> args -> spec -> parts ->
+    part, so a 29-part LEGO brick logged its geometry as ["<...>", ...]: the log
+    recorded that a build happened and its verdict, but not what was built.
+    """
+    from client_v2.runlog import redact
+    spec = {"name": "lego_brick_2x4", "parts": [
+        {"name": "body", "shape": "box", "op": "add",
+         "center": [0, 0, 4.8], "size": [31.8, 15.8, 9.6]},
+        {"name": "stud_1", "shape": "cylinder", "op": "add",
+         "center": [-12, -4, 9.6], "height": [0, 0, 1.8], "radius": 2.4}]}
+    reply = {"type": "AIMessage", "content": "x", "tool_calls": [
+        {"name": "build_from_spec", "args": {"spec": spec}}]}
+
+    out = redact(reply)
+
+    parts = out["tool_calls"][0]["args"]["spec"]["parts"]
+    assert parts[0]["name"] == "body"
+    assert parts[0]["size"] == [31.8, 15.8, 9.6]      # the actual geometry
+    assert parts[1]["radius"] == 2.4
+    assert "<...>" not in json.dumps(out)
+
+
+def test_a_real_parts_list_is_not_truncated():
+    from client_v2.runlog import redact
+    spec = {"parts": [{"name": f"p{i}"} for i in range(29)]}
+    assert len(redact(spec)["parts"]) == 29
+
+
+def test_a_runaway_sequence_is_still_bounded():
+    from client_v2.runlog import _MAX_ITEMS, redact
+    out = redact(list(range(_MAX_ITEMS + 500)))
+    assert len(out) == _MAX_ITEMS + 1              # +1 for the "more items" note
+    assert "more items" in out[-1]
+
+
+def test_depth_is_still_capped_against_a_cycle():
+    from client_v2.runlog import redact
+    deep = cur = {}
+    for _ in range(60):
+        cur["next"] = {}
+        cur = cur["next"]
+    assert "<...>" in json.dumps(redact(deep))      # terminates, does not recurse away
+
+
+def test_images_are_still_redacted_at_depth():
+    from client_v2.runlog import redact
+    nested = {"a": {"b": {"c": {"d": {"e": {"f": {"g": {
+        "url": "data:image/png;base64," + "A" * 5000}}}}}}}}
+    dumped = json.dumps(redact(nested))
+    assert "<image," in dumped and "AAAA" not in dumped

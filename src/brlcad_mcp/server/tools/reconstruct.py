@@ -77,9 +77,12 @@ class BuildSpec(BaseModel):
     expect_bbox: list[float] | None = None
     views: list[str] = Field(default_factory=lambda: ["front", "side"])
     render_size: int = 256
-    # Accepted for backwards compatibility but NOT used: check views are always
-    # rendered with flat ambient light so features stay countable (see
+    # Accepted so previously saved specs still load, but IGNORED: check views are
+    # always rendered with flat ambient light so features stay countable (see
     # _CHECK_LIGHTING).  Use render_model / render_previews for lit renders.
+    # It is deliberately NOT validated -- an ignored field must never be able to
+    # reject a good build, which is what a membership check on it did.  Setting it
+    # is reported back instead (see _report), so a caller learns it had no effect.
     lighting: str = "ambient"
 
 
@@ -88,11 +91,6 @@ def _validate(spec: BuildSpec) -> list[str]:
     errors: list[str] = []
     if not spec.parts:
         return ["spec has no parts"]
-    # Catch a bad lighting mode HERE: otherwise every check render fails one by
-    # one with "unknown lighting mode" after the geometry is already built.
-    if spec.lighting not in R._LIGHTING_MODES:
-        errors.append(f"unknown lighting '{spec.lighting}' "
-                      f"(use {', '.join(R._LIGHTING_MODES)})")
     for view in spec.views:
         if view not in R._VIEWS:
             errors.append(f"unknown view '{view}' "
@@ -469,6 +467,14 @@ def _report(parsed: BuildSpec, folder: str | None, results, header: str) -> str:
         lines.append("Note: expect_bbox was not declared, so the overall size "
                      "was not checked against an intended value. Set it when the "
                      "request states a size or a coordinate range.")
+    if parsed.lighting != _CHECK_LIGHTING:
+        # Say it plainly rather than letting the caller believe it took effect:
+        # the tool's own example used to show "lighting": "studio", so a model
+        # doing exactly what we documented got a silent no-op.
+        lines.append(f"Note: 'lighting' was set to '{parsed.lighting}' and "
+                     f"IGNORED -- check views are always rendered with flat "
+                     f"{_CHECK_LIGHTING} light so repeated features stay "
+                     f"countable. Use render_model for a lit render.")
     if folder:
         lines.append(f"Check renders in:\n  {folder}")
         for view, res in results:
@@ -499,7 +505,6 @@ def build_from_spec(
             '  "color": [40, 40, 45],            // optional RGB 0-255\n'
             '  "views": ["front", "side"],       // check views to render\n'
             '  "render_size": 256,\n'
-            '  "lighting": "studio",\n'
             '  "parts": [\n'
             '    {"name": "body", "shape": "box", "op": "add",\n'
             '     "center": [0,0,0], "size": [72,147,9]},\n'

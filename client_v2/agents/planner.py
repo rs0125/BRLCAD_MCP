@@ -15,7 +15,7 @@ gets a hint rather than nothing.  Parsing/validation lives in
 
 from __future__ import annotations
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from client_v2.agents.conversational import last_human_text, message_text
 from client_v2.agents.verifier import failure_context
@@ -23,6 +23,12 @@ from client_v2.agents.visual import visual_failure_context
 from client_v2.pipeline.plan import parse_plan
 from client_v2.prompts import PROMPTS
 from client_v2.skills import SkillRegistry
+
+# How much of the conversation the planner sees.  A short tail, not the whole
+# transcript: enough to know what was proposed and approved, not enough to make
+# the planning call grow with the session.
+MAX_CONTEXT_TURNS = 3
+MAX_CONTEXT_CHARS = 1500
 
 
 def planning_brief(registry: SkillRegistry) -> str:
@@ -56,12 +62,46 @@ def choose_skill(text: str, known_ids: list[str]) -> str | None:
     return None
 
 
+def conversation_context(state, turns: int = MAX_CONTEXT_TURNS,
+                         limit: int = MAX_CONTEXT_CHARS) -> str:
+    """The last few exchanges, so the planner can plan a FOLLOW-UP turn.
+
+    The planner used to receive only the latest human line.  On "yeah go ahead"
+    -- the turn that actually builds, after the agent has proposed dimensions --
+    it therefore had nothing to plan from and said so: *"No actionable model,
+    dimensions, reference, or approved constraints are present in the available
+    conversation."*  It returned an empty plan, so no skill definition reached the
+    worker, so `build_model_spec`'s cautions were absent on exactly the turn that
+    built the geometry (the missing `expect_bbox` guard is the visible symptom).
+
+    Deliberately a short tail, not the transcript: the planner needs to know what
+    was agreed, not to re-read the session.  Images are dropped -- ``message_text``
+    keeps only text blocks -- so a reference image is never resent here.
+    """
+    messages = state.get("messages") or []
+    lines: list[str] = []
+    for msg in messages[-turns * 2:]:
+        role = ("User" if isinstance(msg, HumanMessage)
+                else "Assistant" if isinstance(msg, AIMessage) else None)
+        if role is None:
+            continue                      # tool traffic is the worker's business
+        text = message_text(msg).strip()
+        if text:
+            lines.append(f"{role}: {text[:limit]}")
+    return "\n".join(lines[-turns * 2:])
+
+
 def make_planner_node(model, registry: SkillRegistry):
     """Node that plans a skill sequence for the request."""
 
     async def planner(state):
         request = last_human_text(state)
-        parts = [f"Skills:\n{planning_brief(registry)}", f"User request:\n{request}"]
+        parts = [f"Skills:\n{planning_brief(registry)}"]
+        # What was already said, so a bare approval ("yeah go ahead") is planable.
+        history = conversation_context(state)
+        if history:
+            parts.append(f"Conversation so far:\n{history}")
+        parts.append(f"User request:\n{request}")
         # On a kick-back, plan again knowing what failed -- either an
         # engine-truth check or the visual comparison with the reference.
         context = failure_context(state) or visual_failure_context(state)

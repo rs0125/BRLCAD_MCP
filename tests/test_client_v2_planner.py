@@ -143,3 +143,64 @@ async def test_the_plan_itself_reaches_the_worker_model_through_the_graph():
     assert "<the spec>" in system_text          # the planner's bound parameters
     assert "build it first" in system_text      # and its reasoning
     assert "units == mm" in system_text         # definition of a NON-terminal step
+
+
+# --- the planner must be able to plan a FOLLOW-UP turn ---------------------
+
+def test_the_planner_sees_what_was_already_agreed():
+    """THE BUG: the planner got only the latest human line.
+
+    On "yeah go ahead" -- the turn that actually builds, after the agent has
+    proposed dimensions -- it had nothing to plan from and said so: "No
+    actionable model, dimensions, reference, or approved constraints are present
+    in the available conversation."  It returned an empty plan, so no skill
+    definition reached the worker, so build_model_spec's cautions were absent on
+    exactly the turn that built the geometry.
+    """
+    from client_v2.agents.planner import conversation_context
+    state = {"messages": [
+        HumanMessage(content="here is a drawing"),
+        AIMessage(content="Body length 31.8 mm, width 15.8 mm, height 9.6 mm."),
+        HumanMessage(content="yeah go ahead"),
+    ]}
+    ctx = conversation_context(state)
+    assert "31.8 mm" in ctx                       # the agreed numbers survive
+    assert "yeah go ahead" in ctx
+    assert "User:" in ctx and "Assistant:" in ctx
+
+
+def test_context_is_a_short_tail_not_the_whole_transcript():
+    from client_v2.agents.planner import MAX_CONTEXT_TURNS, conversation_context
+    msgs = []
+    for i in range(20):
+        msgs += [HumanMessage(content=f"ask {i}"), AIMessage(content=f"reply {i}")]
+    ctx = conversation_context({"messages": msgs})
+    assert "ask 19" in ctx and "ask 0" not in ctx
+    assert len(ctx.splitlines()) <= MAX_CONTEXT_TURNS * 2
+
+
+def test_a_reference_image_is_never_resent_to_the_planner():
+    # Only text blocks are kept, so the planning call cannot carry base64.
+    from client_v2.agents.planner import conversation_context
+    img = HumanMessage(content=[
+        {"type": "text", "text": "model this"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}])
+    ctx = conversation_context({"messages": [img]})
+    assert "model this" in ctx and "base64" not in ctx
+
+
+def test_tool_traffic_is_left_out():
+    from langchain_core.messages import ToolMessage
+
+    from client_v2.agents.planner import conversation_context
+    state = {"messages": [HumanMessage(content="build it"),
+                          ToolMessage(content="SUCCESS: lots of output",
+                                      name="build_from_spec", tool_call_id="1"),
+                          AIMessage(content="done")]}
+    ctx = conversation_context(state)
+    assert "lots of output" not in ctx and "done" in ctx
+
+
+def test_no_history_yields_no_context_block():
+    from client_v2.agents.planner import conversation_context
+    assert conversation_context({}) == ""

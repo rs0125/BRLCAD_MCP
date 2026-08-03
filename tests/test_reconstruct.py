@@ -171,14 +171,42 @@ def test_spec_history_save_list_and_latest(tmp_path, monkeypatch):
     assert len(RC._latest_spec("thing")["parts"]) == 2
 
 
-def test_validate_flags_unknown_lighting_and_view():
+def test_validate_flags_an_unknown_view():
     # Caught up front: otherwise the geometry builds and every check render
-    # fails one-by-one with "unknown lighting mode".
-    spec = BuildSpec(name="x", lighting="default", views=["iso", "bogus"],
+    # fails one-by-one with "unknown view".
+    spec = BuildSpec(name="x", views=["iso", "bogus"],
                      parts=[Part(name="b", shape="box", size=[1, 1, 1])])
     errors = RC._validate(spec)
-    assert any("unknown lighting 'default'" in e for e in errors)
     assert any("unknown view 'bogus'" in e for e in errors)
+
+
+def test_an_ignored_lighting_value_cannot_reject_a_build():
+    # `lighting` is accepted for old saved specs but never used -- check views are
+    # always ambient.  Validating it meant a DEAD field could block a perfectly
+    # good build, so the membership check was removed.
+    spec = BuildSpec(name="x", lighting="whatever_the_model_invented",
+                     parts=[Part(name="b", shape="box", size=[1, 1, 1])])
+    assert RC._validate(spec) == []
+
+
+def test_setting_lighting_is_reported_as_ignored():
+    # The tool's own example used to show "lighting": "studio", so a model doing
+    # exactly what we documented got a silent no-op.  Say so instead.
+    spec = BuildSpec(name="x", lighting="studio", expect_bbox=[1, 1, 1],
+                     parts=[Part(name="b", shape="box", size=[1, 1, 1])])
+    report = RC._report(spec, None, [], "Built region 'x.r'")
+    assert "IGNORED" in report and "studio" in report
+    quiet = BuildSpec(name="x", expect_bbox=[1, 1, 1],
+                      parts=[Part(name="b", shape="box", size=[1, 1, 1])])
+    assert "IGNORED" not in RC._report(quiet, None, [], "Built region 'x.r'")
+
+
+def test_the_tool_example_no_longer_advertises_lighting():
+    # Fixing the field but leaving the example in place would keep teaching it:
+    # the model set lighting because our own spec example showed it.
+    import inspect
+    src = inspect.getsource(RC.build_from_spec)
+    assert '"lighting"' not in src
 
 
 # --- collision guard (guardrail as tooling) -------------------------------
