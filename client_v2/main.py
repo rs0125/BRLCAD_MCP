@@ -5,8 +5,13 @@ Wires the production dependencies into the graph: the Responses-API model
 registry (loaded from client_v2/skills/), and the thin role prompts from
 client_v2.prompts (the v1 monolith is no longer used).
 
-Set ``CLIENT_V2_DEBUG=true`` to stream a per-node agent trace (routing, model
-turns, tool calls, tool results) instead of just the final answer.
+``/trace`` toggles watching what the agent is doing instead of only its final
+answer: model replies and tool calls/results printed live as they happen
+(including inside the worker's tool loop), plus one line per node as it finishes
+showing the state it wrote -- the route, the plan, the verdict.  It is a runtime
+toggle because the moment you want it is right after a turn that surprised you,
+and restarting would discard the conversation.  ``CLIENT_V2_DEBUG=true`` sets the
+starting state for a session.
 
 ``/image`` and ``/paste`` attach a reference image -- the input the
 model_from_dimensioned_sketch workflow works from.  ``/skills`` and ``/prompts``
@@ -39,7 +44,7 @@ from client_v2.terminal.attachments import (
     attached_image_count,
     parse_input,
 )
-from client_v2.terminal.trace import format_update
+from client_v2.terminal.trace import LiveTrace, format_update
 
 _RECURSION_LIMIT = 60
 
@@ -98,10 +103,18 @@ async def _run_turn(graph, inputs, config, debug: bool, log=None) -> None:
     final = None
     payload = inputs
     while payload is not None:
-        async for namespace, update in graph.astream(
-                payload, config, stream_mode="updates", subgraphs=True):
+        # Outer nodes only (no `subgraphs=True`): the worker's internal nodes --
+        # 'model', 'tools', a middleware hook -- used to be the only window into
+        # its loop, but LiveTrace now reports that loop as it runs, with the role
+        # as the label.  Streaming them too added a 36-char UUID namespace per
+        # line and repeated message counts for activity already shown above them.
+        async for update in graph.astream(
+                payload, config, stream_mode="updates"):
             for node, node_update in update.items():
-                print(format_update(node, node_update, namespace))
+                # Messages were already printed live by the LiveTrace callback in
+                # `config`; repeating them here would double every line.
+                print(format_update(node, node_update,
+                                    include_messages=False))
                 final = node_update
         # Streaming ends at a halt too, so ask and resume the same way.
         state = await graph.aget_state(config)
@@ -133,8 +146,6 @@ async def run() -> None:
     log = open_run_log()
 
     print("Starting client-v2 MCP client...")
-    if settings.debug:
-        print("(debug on: streaming agent trace)")
     client = MultiServerMCPClient({
         "brlcad_server": {
             "command": sys.executable,
@@ -157,10 +168,20 @@ async def run() -> None:
             log=log,
         )
         # The callbacks capture every model call, including the ones the worker
-        # makes inside its own tool loop.
+        # makes inside its own tool loop.  LiveTrace rides the same propagation to
+        # PRINT that activity as it happens -- node updates alone cannot, because
+        # the worker's loop is a nested invocation that surfaces only once it has
+        # finished.
+        base_callbacks = log.callbacks()
+        live = LiveTrace()
+        # Tracing is a PER-TURN choice, not a launch-time one.  You want to see
+        # the next turn precisely when the last one surprised you, and an
+        # env-var-only switch means restarting -- throwing away the conversation
+        # the model has been building on -- to answer "what did it just do?".
+        tracing = settings.debug
         config = {"configurable": {"thread_id": "v2"},
                   "recursion_limit": _RECURSION_LIMIT,
-                  "callbacks": log.callbacks()}
+                  "callbacks": list(base_callbacks)}
         log.event("session", tools=len(tools), skills=len(registry.ids()),
                   model=settings.llm.model)
         if log.path:
@@ -168,6 +189,9 @@ async def run() -> None:
 
         print("=" * 49)
         print(" client-v2 active. /help for commands, 'exit' to quit.")
+        # Stated rather than merely available: an opt-in trace nobody knows about
+        # is a trace nobody uses.
+        print(f" trace is {'ON' if tracing else 'off'} -- /trace to toggle.")
         print("=" * 49)
         while True:
             try:
@@ -196,6 +220,10 @@ async def run() -> None:
                     # both rather than making you remember which needs which.
                     print(registry.reload())
                     print(PROMPTS.reload())
+                elif parsed.name == "trace":
+                    tracing = not tracing
+                    print(f"  trace {'on' if tracing else 'off'}"
+                          f"{' -- re-run your last request to watch it' if tracing else ''}")
                 continue
             message = (HumanMessage(content=parsed[1])
                        if isinstance(parsed, tuple) else parsed)
@@ -203,9 +231,11 @@ async def run() -> None:
             if attached:
                 print(f"  (attached {attached} image(s))")
             log.start_turn(text, images=attached)
+            # Rebuilt per turn so /trace takes effect on the very next one.
+            config["callbacks"] = base_callbacks + ([live] if tracing else [])
             try:
                 await _run_turn(graph, {"messages": [message]}, config,
-                                settings.debug, log)
+                                tracing, log)
             except Exception as exc:  # keep the REPL alive on any turn failure
                 print(f"\nAI: that turn failed ({type(exc).__name__}: {exc}).")
 

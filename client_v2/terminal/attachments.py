@@ -28,6 +28,7 @@ HELP_CMDS = ("/help", "/?")
 SKILLS_CMDS = ("/skills",)
 PROMPTS_CMDS = ("/prompts",)
 RELOAD_CMDS = ("/reload",)
+TRACE_CMDS = ("/trace", "/debug")
 QUIT_WORDS = ("exit", "quit")
 
 DEFAULT_IMAGE_PROMPT = "Here is a reference image."
@@ -37,6 +38,8 @@ HELP = """Commands:
                                        (aliases: /images, /img)
   /paste [prompt]                      attach an image from the clipboard
                                        (alias: /clip)
+  /trace                               show/hide what the agent is doing
+                                       step by step (alias: /debug)
   /skills                              list the loaded skill definitions
   /prompts                             list the loaded role prompts
   /reload                              re-read skills and prompts from disk
@@ -50,7 +53,7 @@ Anything else is sent to the agent as a normal message."""
 class ReplCommand:
     """A local command handled by the REPL, not sent to the agent."""
 
-    name: str            # "help" | "skills" | "prompts" | "reload" | "quit"
+    name: str            # help | skills | prompts | reload | trace | quit
 
 
 def data_uri(data: bytes, mime: str) -> str:
@@ -152,6 +155,8 @@ def parse_input(text: str):
         return ReplCommand("prompts")
     if key in RELOAD_CMDS:
         return ReplCommand("reload")
+    if key in TRACE_CMDS:
+        return ReplCommand("trace")
     if key in IMAGE_CMDS:
         return image_message(rest)
     if key in PASTE_CMDS:

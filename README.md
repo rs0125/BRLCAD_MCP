@@ -8,6 +8,7 @@ A natural language interface for [BRL-CAD](https://brlcad.org/) solid modeling, 
 
 - [Overview](#overview)
 - [Architecture](#architecture)
+- [The Agent (client-v2)](#the-agent-client-v2)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
 - [Configuration](#configuration)
@@ -21,13 +22,13 @@ A natural language interface for [BRL-CAD](https://brlcad.org/) solid modeling, 
 
 ## Overview
 
-BRL-CAD is a powerful open-source Constructive Solid Geometry (CSG) modeling system, but its Tcl-based MGED interface has a steep learning curve. This project bridges that gap by placing a conversational AI agent in front of BRL-CAD. Users describe geometry in plain English, and a GPT-4o-backed agent translates those descriptions into precise MGED commands, executes them against a live BRL-CAD instance, and reports the results.
+BRL-CAD is a powerful open-source Constructive Solid Geometry (CSG) modeling system, but its Tcl-based MGED interface has a steep learning curve. This project bridges that gap by placing a conversational AI agent in front of BRL-CAD. Users describe geometry in plain English — or hand it a reference image — and the agent turns that into precise MGED commands, executes them against a live BRL-CAD instance, verifies the result against the model's own raytracer, and reports back.
 
 The system is built on three layers:
 
 1. **libmcpcad Listener** -- the native BRL-CAD command listener (the `mcp_listen` command in MGED), which accepts commands over a length-prefixed local socket and executes them through the C `ged_exec()` pipeline, returning `OK` / `ERR <code>` framed responses. (See the [`libmcpcad` branch](https://github.com/rs0125/brlcad/tree/libmcpcad).)
-2. **MCP Tool Server** -- a Python FastMCP server that exposes typed, validated tool functions (sphere creation, boolean operations, dynamic command discovery, generic command execution, overlap resolution, model health auditing, and rendering) to any MCP-compatible client.
-3. **LangGraph Agent Client** -- a ReAct agent that reasons about user requests, selects the appropriate tools, and orchestrates multi-step modeling operations with real-time tool-call visibility.
+2. **MCP Tool Server** -- a Python FastMCP server that exposes typed, validated tool functions (primitive creation, boolean operations, dynamic command discovery, generic command execution, overlap resolution, model health auditing, spec-driven reconstruction, engine-truth verification, rendering, and rollback) to any MCP-compatible client.
+3. **Agent Client (`client_v2`)** -- a LangGraph state machine of **thin, single-role agents** (intake → planner → authorize → worker/executor → verifier → formatter) driving **skill definitions loaded from YAML at runtime**. This replaced the original single ReAct agent behind one ~4k-token system prompt; see [The Agent](#the-agent-client-v2).
 
 ---
 
@@ -35,15 +36,152 @@ The system is built on three layers:
 
 The system is composed of three layers that communicate in a chain:
 
-- **Client** (`client/agent.py`) — A LangGraph ReAct agent that takes natural-language input from the user, reasons about the request, and decides which MCP tool(s) to call. It maintains a **persistent MCP session** with the server subprocess over **stdio**, so all tool calls share the same server process and TCP connection to MGED.
+- **Client** (`client_v2/`) — A LangGraph `StateGraph` of thin agents. Intake classifies the turn as chat or work; the planner turns work into an ordered, parameterized plan over the skill registry; an authorization gate can genuinely halt the graph for a user decision; the plan then runs either deterministically (executor, no model calls) or through the worker (the **only** agent with tool access); the verifier gates on engine truth and can kick work back to the planner; the formatter produces the final answer. It maintains a **persistent MCP session** with the server subprocess over **stdio**, so all tool calls share the same server process and TCP connection to MGED.
 
-- **Server** (`server/app.py` + `server/tools/*`) — A FastMCP tool server that exposes 12 typed, validated tools: dedicated geometry tools (sphere, cylinder, box, booleans), meta-tools for dynamic command discovery and execution, and higher-level tools for overlap resolution, model health auditing, and rendering. When a tool is invoked, it builds the corresponding MGED command(s) and sends them to BRL-CAD over a **persistent** connection via the transport layer (`transport/socket_bridge.py`). Responses are keyed off `SUCCESS:`/`ERROR:` prefixes that the transport derives from the listener's framed status.
+- **Server** (`server/app.py` + `server/tools/*`) — A FastMCP tool server that exposes 20 typed, validated tools: dedicated geometry tools (sphere, cylinder, box, booleans), meta-tools for dynamic command discovery and execution, and higher-level tools for overlap resolution, model health auditing, spec-driven building, verification, rendering, and rollback. When a tool is invoked, it builds the corresponding MGED command(s) and sends them to BRL-CAD over a **persistent** connection via the transport layer (`transport/socket_bridge.py`). Responses are keyed off `SUCCESS:`/`ERROR:` prefixes that the transport derives from the listener's framed status.
 
 - **Transport** (`transport/socket_bridge.py`) — Speaks the libmcpcad length-prefixed frame protocol (`MC` + u32 big-endian length + payload) in both directions, keeping a single long-lived connection so MGED state persists across calls. It translates the listener's `OK` / `ERR <code>` status into the `SUCCESS:` / `ERROR:` prefix the tools expect. The command text on the wire is plain MGED syntax — only the framing is structured.
 
-**Request lifecycle:** User prompt → Agent selects tool → MCP server builds MGED command → framed socket → libmcpcad listener runs it via `ged_exec()` → result flows back through the same chain.
+**Request lifecycle:** User prompt → intake routes it → planner emits a plan → (authorize) → worker/executor calls a tool → MCP server builds MGED command → framed socket → libmcpcad listener runs it via `ged_exec()` → result flows back → verifier gates it → formatter answers.
 
 > The pre-libmcpcad Tcl `uplevel` listener is preserved under [`legacy/`](legacy/) for historical reference and older MGED builds.
+
+---
+
+## The Agent (client-v2)
+
+`client_v2/` is the shipping client (`brlcad-mcp chat`). It exists because a
+single agent behind one large system prompt bundled agent identity, an MGED
+command reference, guardrails, tool selection, several workflows, recovery
+handling and rendering concepts into one blob — which works in a demo and fails
+unpredictably in use. v2 splits that into roles, moves behavior out of prose into
+data, and makes reliability measurable.
+
+### Graph
+
+```
+intake --chat--> respond ------------------------------------------> END
+       --work--> planner -> authorize (may HALT for a decision)
+                              +--(deterministic plan)--> executor --+
+                              |                                     |
+                              +--(otherwise)---------> worker ------+
+                                                                    |
+                                         verifier <-----------------+
+                                           |    |
+                    revise (bounded) <-----+    +--> visual_check
+                       back to planner               |     |     |
+                             ^-----------------------+     |     +--> END
+                              (visual mismatch, once)      +--> formatter --> END
+```
+
+Two boundaries are load-bearing:
+
+- **`agents/` vs `pipeline/`** — anything under `pipeline/` is deterministic and
+  reproducible (plan schema, executor). Anything under `agents/` asks a model.
+  Where a behavior lives tells you whether it can be flaky.
+- **`terminal/` vs everything else** — the graph has no opinion about how a human
+  is talking to it, which is what lets the eval harness drive the same graph
+  headlessly.
+
+### Skills: behavior as data, editable at runtime
+
+Capabilities are **YAML definitions**, not prompt prose, under
+`client_v2/skills/definitions/`. Each spells out I/O params, preconditions,
+dependencies, steps, examples, cautions, success/abort criteria, recovery actions
+and effects. A *workflow* is a skill whose steps compose other skills — the
+target demonstration workflow is `model_from_dimensioned_sketch` (reference image
+or sketch → verified model + orthographic check renders).
+
+The registry uses progressive disclosure: a lean catalog is always in context,
+and a skill's full detail is injected only when it is in play. `/reload` re-reads
+the definitions **and** the role prompts in a running session, so a skill can be
+debugged and retried without a restart.
+
+Role prompts are likewise files, not string literals:
+`client_v2/prompts/definitions/*.md`, re-read per model call. Point
+`CLIENT_V2_PROMPTS_DIR` at a directory to override individual prompts without
+touching the repo.
+
+### Verification is engine truth, not vibes
+
+The gate is BRL-CAD's own raytracer, not a render and not a vision model.
+`verify_model_dimensions` samples the built region with ~40 rays and compares, per
+ray, the material thickness the spec predicts (evaluated analytically) against
+the thickness `nirt` reports, plus a bounding-box check. One shape-agnostic
+comparison catches a subtraction that silently did not apply, a cavity in the
+wrong place or of the wrong size or diameter, a blind pocket and its depth, and
+wrong overall dimensions. A failure fails the turn and kicks it back to the
+planner, bounded by a revision budget.
+
+There is also an optional `visual_check` node that compares check renders to a
+reference image. It is deliberately non-gating — an unclear verdict defaults to
+MATCH — so correctness always rests on engine truth.
+
+### Watching a turn
+
+`CLIENT_V2_DEBUG=true` shows what the agent is doing as it does it:
+
+```
+--- trace ---
+▸ intake
+    route: work
+    [planner] AI: {"steps": [{"skill": "build_model_spec", …}]}
+▸ planner
+    plan: {'steps': [{'skill': 'build_model_spec', …}]}
+▸ authorize
+    authorized: True
+    [worker] ▸ build_from_spec({'spec': {'name': 'bearing', …}})
+    [worker]   ✓ Built bearing.r with 4 part(s). Check renders: front, side, top…
+    [worker] ▸ verify_model_dimensions({'region': 'bearing.r'})
+    [worker]   ✓ Verification of 'bearing.r': PASS (40 rays, bbox within 1mm)
+    [worker] AI: Built bearing.r and verified it.
+▸ worker
+    (+5 message(s))
+▸ verifier
+    verification: {'passed': True, 'checked': True, 'failures': []}
+--- end trace ---
+```
+
+Two sources, because they answer different questions. Indented lines are printed
+**live** by a callback handler as each model reply and tool call happens, each
+labelled with the node it came from. Flush-left `▸` lines appear as each node
+**finishes**, showing the state it wrote — the route, the plan, the verdict.
+
+The live half has to be a callback rather than a stream reader: the worker runs
+its tool loop in a nested invocation, so the graph's own node updates surface
+nothing until that whole loop is done — a long build would print silence for
+minutes and then dump everything at once. Callbacks propagate into the nested run
+(the same reason the run log can see it), so tool calls appear as they are made.
+
+This is not raw chain-of-thought: reasoning items come back encrypted, and only
+the model's own summary is human-readable. The trace prints that summary (as
+`· …` lines) when the model returns one — which requires asking for it, by adding
+`"summary": "auto"` to the `reasoning` config in `client_v2/model.py`.
+
+### Run logs
+
+Every session appends newline-delimited JSON to
+`~/brlcad_agent_logs/run_<stamp>.jsonl` (override with `CLIENT_V2_LOG_DIR`):
+per-node state writes, every model call with its prompt/reply/usage (including
+the ones inside the worker's tool loop), interrupts and the final answer. Base64
+images are replaced by their byte count. A logging failure never costs a build.
+
+### Evals
+
+`evals/` scores the pipeline against ground truth rather than against the spec
+the agent invented:
+
+```bash
+python -m evals.harness              # tool mode: build from ground truth (no API key)
+python -m evals.harness --mode agent # agent mode: build from the prompt
+python -m evals.harness --case l_bracket
+```
+
+Cases live in `evals/cases/*.yaml`, each with a natural-language prompt (and
+optionally a reference `image:`), a ground-truth spec, and explicit ray/bbox
+assertions. Agent mode is multi-turn, so the workflow's confirmation step is
+exercised rather than bypassed. Both modes need a running listener; tool mode
+needs no API key and is the one that catches pipeline regressions.
 
 ---
 
@@ -51,7 +189,10 @@ The system is composed of three layers that communicate in a chain:
 
 - **Python 3.10+**
 - **BRL-CAD** with the `libmcpcad` listener (the `mcp_listen` MGED command — see the [`libmcpcad` branch](https://github.com/rs0125/brlcad/tree/libmcpcad))
-- **OpenAI API key** with access to the GPT-4o model (or another supported model)
+- **OpenAI API key** — the default model is set by `OPENAI_MODEL` (see
+  [Configuration](#configuration)). A reasoning-capable model is recommended; the
+  client uses the Responses API and preserves reasoning items across tool calls.
+  Image input requires a vision-capable model.
 
 ---
 
@@ -106,6 +247,9 @@ All configuration is managed through a `.env` file in the project root. A templa
 | `BRLCAD_RENDER_DIR`   | Directory where rendered images are written  | `~/brlcad_renders` |
 | `BRLCAD_RENDER_TIMEOUT` | Seconds to wait for one render (raise for slow renders) | `1800` |
 | `MCP_TRANSPORT`       | MCP transport type                           | `stdio`       |
+| `CLIENT_V2_DEBUG`     | Show the live agent trace instead of only the final answer (see [Watching a turn](#watching-a-turn)) | `false` |
+| `CLIENT_V2_LOG_DIR`   | Where per-run JSONL logs are written         | `~/brlcad_agent_logs` |
+| `CLIENT_V2_PROMPTS_DIR` | Directory of role-prompt overrides, overlaid on the built-ins | -- |
 
 **Important:** Never commit your `.env` file. It is already included in `.gitignore`.
 
@@ -158,31 +302,57 @@ python -m brlcad_mcp chat
 You should see:
 
 ```
-Starting local MCP Client...
-Successfully loaded 12 tool(s) from BRL-CAD!
-
+Starting client-v2 MCP client...
+Loaded 20 tool(s) from BRL-CAD; 13 skill(s).
+run log: /home/you/brlcad_agent_logs/run_20260803-101500.jsonl
 =================================================
- BRL-CAD Terminal Agent Active. Type 'exit' to quit.
+ client-v2 active. /help for commands, 'exit' to quit.
 =================================================
 ```
+
+`brlcad-mcp chat --v1` runs the deprecated single-agent client instead; it is kept
+only so a v1/v2 comparison is still possible.
 
 ### Step 3: Describe Geometry in Plain English
 
 ```
 You: Create a sphere named ball.s at the origin with radius 10
 
-AI is calculating geometry...
-
 AI: Created sphere ball.s at (0.0, 0.0, 0.0) with radius 10.0. The sphere is now visible in the MGED viewer.
 ```
 
-Type `exit` or `quit` to terminate the session.
+### Step 4: Or Hand It a Reference Image
+
+```
+You: /image ~/Downloads/bracket.png model this L-bracket in mm
+  (attached 1 image(s))
+
+AI needs a decision: I read 50 x 50 x 10 mm with a 6 mm bore, 12 mm from each
+    outer edge. Confirm these dimensions before I build?
+You: approved
+
+AI: Built bracket.r ... Verification of 'bracket.r': PASS
+```
+
+REPL commands (`/help` lists them all):
+
+| Command | Effect |
+|---|---|
+| `/image <path…> [prompt]` | attach image file(s) and send a message (aliases `/images`, `/img`) |
+| `/paste [prompt]` | attach an image from the clipboard (alias `/clip`) |
+| `/skills` | list the loaded skill definitions |
+| `/prompts` | list the loaded role prompts |
+| `/reload` | re-read skills and prompts from disk, mid-session |
+| `exit` \| `quit` | leave |
+
+Set `CLIENT_V2_DEBUG=true` to stream a node-by-node trace instead of just the
+final answer.
 
 ---
 
 ## Available Tools
 
-The MCP server currently exposes **12 tools** organised into four groups: dedicated geometry tools, meta-tools for dynamic command discovery/execution, geometry-analysis tools, and rendering.
+The MCP server currently exposes **20 tools**: dedicated geometry tools, meta-tools for dynamic command discovery/execution, geometry-analysis tools, rendering, spec-driven reconstruction, engine-truth verification, and rollback.
 
 ### Dedicated Geometry Tools
 
@@ -264,6 +434,15 @@ Diagnose a failed MGED command: fetches help text, checks object existence, and 
 
 These run BRL-CAD's own analysers over the socket and summarise the results for the agent.
 
+#### `verify_model_dimensions`
+
+Check a spec-backed region against its spec objectively, using BRL-CAD's own
+raytracer: a bounding-box comparison plus ~40 `nirt` rays whose measured material
+thickness is compared to what the spec predicts analytically. Shape-agnostic, so
+one check covers missing subtractions, mislocated or mis-sized cavities, wrong
+hole diameters, blind pockets and their depth, and wrong overall dimensions. This
+is the verifier's gate — no render, no vision model.
+
 #### `model_health_report`
 
 Audit an object with BRL-CAD's validators (lint checks plus `gqa` overlap detection on a fixed grid) and return a single grouped health report. Uses `gqa -g <grid>` so it never hangs on coincident faces.
@@ -282,7 +461,7 @@ Sweep an assembly for overlaps and resolve each by minimal sliding, re-running `
 
 Render the model the listener currently has open to a PNG, over the socket via the ged `rt` command (no `.g` path needed, no `opendb`). View presets (iso, front, side, top, back, and rear-quarter isometrics) or a custom azimuth/elevation, at three lighting levels: `studio` (default, camera-relative three-point rig — every angle lit the same), `model` (world-fixed rig — fixed-sun look), and `ambient` (evenly-lit, no rig). Renders entirely over the socket — `rt` writes the PNG directly, so no BRL-CAD binaries or `PATH` setup are required.
 
-The client feeds the resulting PNG back to the model as a user-role message, so the agent actually *sees* what it rendered (and can re-render from a better angle) instead of guessing from the file path.
+In client-v2 the rendered PNGs are fed back to a model in the `visual_check` node, which compares them against the reference image the user attached. That check is non-gating by design; correctness rests on `verify_model_dimensions`.
 
 #### `render_previews`
 
@@ -375,21 +554,60 @@ the real LangGraph agent against the mock listener and assert on the
 resulting fake-database state, so they validate the full
 prompt → LLM → tool → transport chain without a live BRL-CAD instance.
 
+Every part of the v2 graph is tested with injected fakes (`tests/v2_fakes.py`) —
+models, tools, classifier and registry are all constructor arguments — so routing,
+planning, execution, verification, kick-backs and the authorization halt are all
+exercised offline. Reliability of the *whole pipeline against real geometry* is a
+separate question, measured by the [eval harness](#evals) rather than by pytest.
+
 ---
 
 ## Project Structure
 
+The tree mirrors the architecture rather than being a flat pile of modules, so the
+design is legible from `ls`.
+
 ```
 brlcad-mcp/
+├── client_v2/                       # THE AGENT (brlcad-mcp chat)
+│   ├── main.py                      # REPL entry point (python -m client_v2.main)
+│   ├── graph.py                     # wires the agents into a LangGraph state machine
+│   ├── state.py                     # the shared state every node reads and updates
+│   ├── model.py                     # LLM factory (Responses API, reasoning effort)
+│   ├── runlog.py                    # per-run JSONL logging (nodes, model calls)
+│   ├── agents/                      # one module per ROLE, each with a single job
+│   │   ├── conversational.py        #   intake: chat-vs-work routing + turn reset
+│   │   ├── planner.py               #   work request -> ordered, parameterized plan
+│   │   ├── authorize.py             #   real graph halt for a user decision
+│   │   ├── worker.py                #   the only agent with tool access
+│   │   ├── verifier.py              #   engine-truth gate + bounded kick-back
+│   │   ├── visual.py                #   non-gating render-vs-reference comparison
+│   │   └── formatter.py             #   final answer in the required form
+│   ├── pipeline/                    # DETERMINISTIC machinery, no model calls
+│   │   ├── plan.py                  #   plan schema + parsing/validation
+│   │   └── executor.py              #   runs a deterministic plan, binds ${refs}
+│   ├── skills/
+│   │   ├── registry.py              #   schema + loader + hot reload
+│   │   ├── middleware.py            #   prompt injection (catalog / active detail)
+│   │   └── definitions/*.yaml       #   THE SKILLS AND WORKFLOWS
+│   ├── prompts/
+│   │   ├── library.py               #   file-backed prompts, re-read per call
+│   │   └── definitions/*.md          #   the thin per-role prompts
+│   └── terminal/                    # REPL-facing only
+│       ├── attachments.py           #   /image, /paste, command parsing
+│       └── trace.py                 #   debug trace formatting
+├── evals/
+│   ├── harness.py                   # scores tool mode and agent mode vs ground truth
+│   └── cases/*.yaml                 # golden cases (prompt, image, spec, assertions)
 ├── src/
 │   └── brlcad_mcp/
 │       ├── __init__.py              # Package metadata and version
 │       ├── __main__.py              # python -m brlcad_mcp entry point
-│       ├── cli.py                   # CLI argument parsing (serve / chat)
+│       ├── cli.py                   # CLI argument parsing (serve / chat [--v1])
 │       ├── config.py                # Centralised settings from env / .env
 │       ├── client/
 │       │   ├── __init__.py
-│       │   └── agent.py             # LangGraph ReAct agent + chat loop
+│       │   └── agent.py             # DEPRECATED v1 single-agent client
 │       ├── server/
 │       │   ├── __init__.py
 │       │   ├── app.py               # FastMCP application instance
@@ -403,19 +621,20 @@ brlcad-mcp/
 │       │       ├── execution.py     # execute_command + analyze_command_error tools
 │       │       ├── geometry_ops.py  # separate_overlap + resolve_overlaps tools
 │       │       ├── health.py        # model_health_report tool
-│       │       └── rendering.py     # render_model tool (rt over the socket)
+│       │       ├── reconstruct.py   # build_from_spec / edit_build / undo_build
+│       │       ├── csg.py           # analytic ray-vs-spec kernel (pure)
+│       │       ├── verify.py        # verify_model_dimensions (bb + nirt)
+│       │       ├── snapshots.py     # auto-snapshot + restore_backup
+│       │       └── rendering.py     # render_model / render_previews (rt over the socket)
 │       └── transport/
 │           ├── __init__.py
 │           └── socket_bridge.py     # Persistent libmcpcad frame connection
 ├── tests/
-│   ├── __init__.py
 │   ├── conftest.py                  # MockListener (fake MGED) + fixtures
-│   ├── test_config.py
-│   ├── test_helpers.py
 │   ├── test_transport.py            # real bridge ↔ mock frame listener
-│   ├── test_tools.py
-│   ├── test_discovery.py
-│   ├── test_rendering.py            # render tool logic (hermetic)
+│   ├── test_tools.py                # server tools over the mock listener
+│   ├── test_csg.py / test_verify.py # verification kernel + verdicts
+│   ├── test_client_v2_*.py          # one file per v2 component
 │   └── test_agent_nl.py             # natural-language tests (opt-in: --run-llm)
 ├── examples/
 │   └── nl_demo.py                   # scripted natural-language walkthrough

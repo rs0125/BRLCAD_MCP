@@ -34,7 +34,10 @@ dev = [
 brlcad-mcp = "brlcad_mcp.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/brlcad_mcp"]
+# client_v2 is the shipping client (`brlcad-mcp chat`), so it has to be in the
+# wheel alongside the server -- with its skill/prompt definition files, which are
+# read from disk at runtime rather than being baked into the code.
+packages = ["src/brlcad_mcp", "client_v2"]
 
 [tool.ruff]
 target-version = "py310"

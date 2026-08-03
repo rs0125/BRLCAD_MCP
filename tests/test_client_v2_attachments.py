@@ -13,6 +13,7 @@ from langchain_core.messages import HumanMessage
 
 from client_v2.terminal.attachments import (
     DEFAULT_IMAGE_PROMPT,
+    HELP,
     ReplCommand,
     attached_image_count,
     image_message,
@@ -42,9 +43,16 @@ def image_file(tmp_path):
 def test_quit_help_skills_reload_are_local_commands():
     for text, name in (("exit", "quit"), ("quit", "quit"), ("/help", "help"),
                        ("help", "help"), ("/?", "help"), ("/skills", "skills"),
-                       ("/reload", "reload")):
+                       ("/reload", "reload"), ("/trace", "trace"),
+                       ("/debug", "trace")):
         parsed = parse_input(text)
         assert isinstance(parsed, ReplCommand) and parsed.name == name, text
+
+
+def test_trace_command_is_listed_in_help():
+    # An opt-in trace nobody is told about is a trace nobody uses -- which is
+    # exactly how it went unnoticed while only an env var enabled it.
+    assert "/trace" in HELP
 
 
 def test_plain_text_becomes_a_user_turn():
