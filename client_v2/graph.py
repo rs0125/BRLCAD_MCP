@@ -40,7 +40,11 @@ from client_v2.agents.conversational import (
 )
 from client_v2.agents.formatter import make_formatter_node, needs_formatting
 from client_v2.agents.planner import make_planner_node
-from client_v2.agents.verifier import make_verifier_node, route_after_verify
+from client_v2.agents.verifier import (
+    make_verifier_node,
+    revision_budget_spent,
+    route_after_verify,
+)
 from client_v2.agents.visual import make_visual_check_node, route_after_visual
 from client_v2.agents.worker import make_context_middleware, make_worker_node
 from client_v2.pipeline.executor import is_deterministic, make_executor_node
@@ -77,8 +81,15 @@ def route_after_verification(state) -> str:
 
 
 def route_after_visual_check(state) -> str:
-    """Post-visual: a mismatch may revise once; otherwise format or finish."""
-    if route_after_visual(state) == "revise":
+    """Post-visual: a mismatch may revise once; otherwise format or finish.
+
+    The revision budget is checked HERE as well as on the verifier's edge: every
+    path back to the planner answers to the same counter.  This edge used to be
+    bounded only by the visual round counter, so when that stopped advancing
+    nothing else could stop it -- ``revisions`` reached 12 while the only gate
+    that could have halted the turn governed a different edge.
+    """
+    if route_after_visual(state) == "revise" and not revision_budget_spent(state):
         return "revise"
     return "format" if needs_formatting(state) else "done"
 

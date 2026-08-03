@@ -89,11 +89,17 @@ def make_visual_check_node(model):
     """Node that compares this turn's renders against the reference image."""
 
     async def visual_check(state):
-        renders = find_render_paths(state)
-        if not renders or not has_reference_image(state):
-            return {}                       # nothing to look at: no model call
-        if (state.get("visual_rounds") or 0) >= MAX_VISUAL_ROUNDS:
-            return {}
+        prior = state.get("visual")
+        # Only one place decides whether a fresh opinion is possible, and if it
+        # is not, any prior mismatch is stamped `spent` so it cannot be routed on
+        # twice.  Returning a bare {} here left a stale mismatch live in state:
+        # the node stopped judging but the router kept revising on the verdict
+        # from a round already spent, forever.
+        can_judge = (bool(renders := find_render_paths(state))
+                     and has_reference_image(state)
+                     and (state.get("visual_rounds") or 0) < MAX_VISUAL_ROUNDS)
+        if not can_judge:
+            return {"visual": {**prior, "spent": True}} if prior else {}
         parts: list[dict] = [{"type": "text", "text": (
             "Here are the renders of what was just built. Compare them with the "
             "reference image above.")}]
@@ -112,12 +118,18 @@ def make_visual_check_node(model):
 
 
 def route_after_visual(state) -> str:
-    """Send a visual mismatch back to the planner once; otherwise carry on."""
+    """Send a LIVE visual mismatch back to the planner; otherwise carry on.
+
+    Deliberately reads no counter.  It used to compare ``visual_rounds`` against
+    the node's own threshold with ``>`` where the node used ``>=`` -- and because
+    the node stopped incrementing once its budget was spent, the counter froze
+    one short of the router's test, which therefore never fired.  Routing now
+    depends on a single explicit fact -- is there an unacted-on mismatch -- which
+    the node is the only thing that sets.
+    """
     visual = state.get("visual") or {}
-    if visual.get("matched", True):
-        return "ok"
-    if (state.get("visual_rounds") or 0) > MAX_VISUAL_ROUNDS:
-        return "ok"                          # opinion noted, budget spent
+    if visual.get("matched", True) or visual.get("spent"):
+        return "ok"                          # matched, or already acted on
     return "revise"
 
 

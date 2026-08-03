@@ -217,3 +217,73 @@ async def test_a_bad_turn_does_not_poison_the_next_turn_on_the_same_thread():
     assert second["step_outputs"]["make_a"] == "A:hi"   # it actually ran
     assert second["verification"]["passed"] is True     # not poisoned
     assert second["revisions"] == 0                     # budget replenished
+
+
+# --- order-aware evaluation: a fixed error must not fail the turn ----------
+
+_DB_ERR = "Error: failed to create 'base' (box): A database is not open!"
+_PASS = ("Verification of 'p004_bearing.r': PASS\n"
+         "  [ok] bbox: expected (100.0, 24.0, 55.0) mm, got (100.0, 24.0, 55.0) mm\n"
+         "  [ok] geometry: all 72 sample rays match the spec")
+
+
+def test_an_error_that_was_retried_and_verified_does_not_fail_the_turn():
+    """The axlebearing turn, reduced.
+
+    THE BUG: the first build failed (no database open), the agent found `opendb`,
+    retried, and the region verified PASS with an exact bbox -- and the turn was
+    still failed on its own first attempt, 12 times running, because the verdict
+    was read without regard to order.  Retry-then-succeed is the most common
+    shape of a successful turn.
+    """
+    verdict = evaluate([_DB_ERR, "opendb ok", "Built region 'p004_bearing.r'", _PASS])
+    assert verdict.checked and verdict.passed
+    assert verdict.failures == []
+
+
+def test_an_error_after_the_last_verdict_still_fails():
+    # A PASS only supersedes what came BEFORE it.
+    verdict = evaluate([_PASS, "Error: kill failed"])
+    assert verdict.checked and not verdict.passed
+
+
+def test_a_pass_supersedes_an_earlier_fail_for_the_same_region():
+    verdict = evaluate(["Verification of 'plate.r': FAIL\n [x] bbox: bad",
+                        "edit_build applied",
+                        "Verification of 'plate.r': PASS"])
+    assert verdict.passed
+
+
+def test_a_pass_for_one_region_does_not_clear_another_regions_fail():
+    verdict = evaluate(["Verification of 'a.r': FAIL", "Verification of 'b.r': PASS"])
+    assert not verdict.passed
+    assert any("a.r" in f for f in verdict.failures)
+
+
+def test_an_error_with_no_later_verdict_still_fails():
+    assert not evaluate([_DB_ERR]).passed
+
+
+# --- the loops terminate ---------------------------------------------------
+
+def test_revision_budget_is_shared_by_every_loop_back():
+    from client_v2.agents.verifier import revision_budget_spent
+    assert not revision_budget_spent({"revisions": MAX_REVISIONS - 1})
+    assert revision_budget_spent({"revisions": MAX_REVISIONS})
+
+
+def test_a_spent_visual_mismatch_stops_routing_back_to_the_planner():
+    from client_v2.agents.visual import route_after_visual
+    from client_v2.graph import route_after_visual_check
+    live = {"visual": {"matched": False}, "revisions": 0}
+    spent = {"visual": {"matched": False, "spent": True}, "revisions": 0}
+    assert route_after_visual(live) == "revise"       # one revision is allowed
+    assert route_after_visual(spent) == "ok"          # ...and only one
+    assert route_after_visual_check(spent) != "revise"
+
+
+def test_the_visual_edge_also_obeys_the_revision_budget():
+    from client_v2.graph import route_after_visual_check
+    out_of_budget = {"visual": {"matched": False}, "revisions": MAX_REVISIONS,
+                     "verification": {"passed": False}}
+    assert route_after_visual_check(out_of_budget) != "revise"

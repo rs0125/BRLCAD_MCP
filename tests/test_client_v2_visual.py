@@ -76,13 +76,36 @@ def test_unparseable_opinion_defaults_to_a_match():
 # --- routing and revision context ----------------------------------------
 
 def test_routing_allows_one_revision_then_carries_on():
+    # Routing turns on `spent`, which the NODE sets, not on a round counter.
+    # This test used to assert termination at visual_rounds == MAX + 1 -- a state
+    # the node can never produce, because it stops incrementing at MAX.  So it
+    # proved termination for an unreachable state and passed while the real graph
+    # revised until it hit the recursion limit.
     mismatch = {"visual": {"matched": False}, "visual_rounds": 1}
     assert route_after_visual(mismatch) == "revise"
-    spent = {"visual": {"matched": False},
-             "visual_rounds": MAX_VISUAL_ROUNDS + 1}
+    spent = {"visual": {"matched": False, "spent": True}, "visual_rounds": 1}
     assert route_after_visual(spent) == "ok"
     assert route_after_visual({"visual": {"matched": True}}) == "ok"
     assert route_after_visual({}) == "ok"
+
+
+async def test_a_declined_round_marks_the_mismatch_spent(tmp_path):
+    # The livelock: with its budget gone the node returned a bare {}, leaving the
+    # previous round's mismatch live, so the router kept revising on it.
+    png = tmp_path / "iso.png"
+    png.write_bytes(b"x")
+    node = make_visual_check_node(
+        FakeToolCallingModel(responses=[AIMessage(content="MISMATCH: nope")]))
+    state = {
+        "messages": [_image_message(), ToolMessage(content=str(png), name="t",
+                                                   tool_call_id="1")],
+        "visual": {"matched": False, "detail": "nope"},
+        "visual_rounds": MAX_VISUAL_ROUNDS,          # budget already spent
+    }
+    out = await node(state)
+    assert out["visual"]["spent"] is True
+    assert out["visual"]["detail"] == "nope"         # detail kept for the report
+    assert route_after_visual({**state, **out}) == "ok"
 
 
 def test_failure_context_tells_the_planner_what_to_change():
@@ -133,3 +156,52 @@ async def test_comparison_call_carries_exactly_the_reference_and_the_renders(
     # system + one reference message + the renders message: no transcript.
     assert len(sent) == 3
     assert old_ref not in sent
+
+
+# --- the crash, end to end -------------------------------------------------
+
+async def test_a_persistent_visual_mismatch_terminates_instead_of_recursing(
+        tmp_path):
+    """The axlebearing crash, reproduced through the real graph.
+
+    A build that keeps drawing a mismatching render used to loop
+    visual_check -> planner -> worker -> verifier -> visual_check until
+    GraphRecursionError at 60 supersteps.  With a low recursion limit this test
+    fails loudly if the loop ever comes back.
+    """
+    from langchain_core.tools import tool
+
+    from client_v2.graph import build_graph
+    from client_v2.skills import SkillDef, SkillRegistry
+
+    png = tmp_path / "iso.png"
+    png.write_bytes(b"x")
+
+    @tool
+    def draw_it() -> str:
+        """Render the model."""
+        return f"rendered to {png}"
+
+    registry = SkillRegistry({"render": SkillDef.model_validate(
+        {"id": "render", "description": "renders",
+         "steps": [{"call": "draw_it", "with": {}}]})})
+    plan = '{"steps": [{"skill": "render", "params": {}}]}'
+
+    graph = build_graph(
+        worker_model=FakeToolCallingModel(responses=[]),
+        planner_model=FakeToolCallingModel(
+            responses=[AIMessage(content=plan)] * 20),
+        # Always says the render is wrong -- the worst case for the visual loop.
+        visual_model=FakeToolCallingModel(
+            responses=[AIMessage(content="MISMATCH: still wrong")] * 20),
+        formatter_model=FakeToolCallingModel(
+            responses=[AIMessage(content="done")] * 20),
+        tools=[draw_it], worker_prompt="unused", registry=registry,
+        classifier=lambda t: "work")
+
+    result = await graph.ainvoke(
+        {"messages": [_image_message("build me this")]},
+        {"recursion_limit": 25})       # far below the 60 that used to blow up
+
+    assert result["visual"]["matched"] is False      # the opinion is reported
+    assert result["visual_rounds"] == MAX_VISUAL_ROUNDS
