@@ -22,12 +22,6 @@ def test_loads_the_shipped_example_skills():
     assert reg.get("model_from_dimensioned_sketch").kind == "workflow"
 
 
-def test_by_kind_splits_skills_and_workflows():
-    reg = SkillRegistry.from_dir()
-    assert reg.get("model_from_dimensioned_sketch") in reg.by_kind("workflow")
-    assert reg.get("build_model_spec") in reg.by_kind("skill")
-
-
 def _server_tool_names():
     """The MCP tools actually registered by the server."""
     import asyncio

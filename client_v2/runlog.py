@@ -14,13 +14,15 @@ So every run appends newline-delimited JSON events to one file:
 * ``interrupt``   -- the graph halted for a decision, and what answered it
 * ``result``      -- the turn's final answer
 
-Two rules the implementation keeps:
+Three rules the implementation keeps:
 
 1. **It never breaks a turn.** Every write is guarded; a logging failure is
    swallowed (and noted once), because losing a log line must never cost a build.
 2. **Images are redacted.** A base64 data URI is replaced by its byte count.
    Logging them verbatim would produce multi-megabyte lines and make the log
    unreadable -- the opposite of the point.
+3. **Encrypted reasoning is redacted.** Same reason, different payload: see
+   ``_OPAQUE_KEYS``.
 """
 
 from __future__ import annotations
@@ -47,6 +49,15 @@ _DATA_URI = "data:image"
 _MAX_DEPTH = 24
 # Enough to hold a real parts list; a runaway sequence still cannot fill the disk.
 _MAX_ITEMS = 400
+# Keys whose value is opaque BY NATURE, so logging it can only cost bytes.  A
+# reasoning item from the Responses API carries the model's chain-of-thought as
+# ciphertext that only OpenAI can decrypt; it is replayed on every later call in a
+# tool chain, so verbatim it spent ~a third of the file on characters nobody can
+# read.  What the log is actually asked -- did reasoning carry across the tool
+# call, and how much was spent -- is answered by the item's sibling ``id`` and by
+# the reply's ``reasoning`` token count, both of which stay.  Unlike an image this
+# cannot be spotted from the value, so it is keyed by name.
+_OPAQUE_KEYS = {"encrypted_content"}
 
 
 def redact(value: Any, _depth: int = 0) -> Any:
@@ -58,7 +69,7 @@ def redact(value: Any, _depth: int = 0) -> Any:
             return f"<image, {len(value)} b64 chars>"
         return value if len(value) <= _MAX_STR else value[:_MAX_STR] + "…<clipped>"
     if isinstance(value, dict):
-        return {str(k): redact(v, _depth + 1) for k, v in value.items()}
+        return {str(k): _redact_entry(k, v, _depth + 1) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         out = [redact(v, _depth + 1) for v in value[:_MAX_ITEMS]]
         if len(value) > _MAX_ITEMS:
@@ -67,6 +78,13 @@ def redact(value: Any, _depth: int = 0) -> Any:
     if isinstance(value, (int, float, bool)) or value is None:
         return value
     return redact(_describe(value), _depth + 1)
+
+
+def _redact_entry(key: Any, value: Any, depth: int) -> Any:
+    """Redact one dict entry, stubbing values that are opaque by their key."""
+    if key in _OPAQUE_KEYS and isinstance(value, str):
+        return f"<encrypted reasoning, {len(value)} chars>"
+    return redact(value, depth)
 
 
 def _describe(obj: Any) -> Any:

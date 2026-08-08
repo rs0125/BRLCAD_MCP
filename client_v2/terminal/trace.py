@@ -174,9 +174,6 @@ class LiveTrace(BaseCallbackHandler):
         # Nothing to print yet -- only the origin, for the reply that follows.
         self._remember(kwargs)
 
-    def on_llm_start(self, serialized, prompts, **kwargs) -> None:
-        self._remember(kwargs)
-
     def on_llm_end(self, response, **kwargs) -> None:
         message = None
         try:

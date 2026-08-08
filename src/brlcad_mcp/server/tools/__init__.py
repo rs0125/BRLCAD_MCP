@@ -6,6 +6,7 @@
 # Data-only modules (catalog, helpers) are imported transitively and don't
 # need to be listed here.
 
+from brlcad_mcp.server.tools import assumptions as assumptions  # noqa: F401
 from brlcad_mcp.server.tools import boolean as boolean  # noqa: F401
 from brlcad_mcp.server.tools import discovery as discovery  # noqa: F401
 from brlcad_mcp.server.tools import execution as execution  # noqa: F401

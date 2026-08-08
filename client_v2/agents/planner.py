@@ -1,16 +1,31 @@
-"""The planner agent — the "plan" phase.
+"""The planner agent -- the "plan" phase.
 
 Given a work request and the skill catalog, the planner produces an ORDERED,
 PARAMETERIZED plan (a :class:`~client_v2.pipeline.plan.Plan`): which skills to
 run, in what order, with which inputs.  The plan goes into ``state['plan']``,
 which both consumers read: the executor runs it directly when every step is
-callable, and otherwise the SkillsMiddleware injects it -- plus the definitions
-of every skill it names -- into the worker's prompt.
+callable, otherwise the SkillsMiddleware injects it -- plus the definitions of
+every skill it names -- into the worker's prompt.  If no usable plan comes back,
+:func:`choose_skill` sets a single ``active_skill`` so the worker gets a hint
+rather than nothing.  Parsing and validation are pure, in
+:mod:`client_v2.pipeline.plan`.
 
-If the model doesn't return a usable plan, it falls back to single-skill
-selection (:func:`choose_skill`), which sets ``active_skill`` so the worker still
-gets a hint rather than nothing.  Parsing/validation lives in
-:mod:`client_v2.pipeline.plan` and is pure.
+Two things the planner MUST see, both learned the hard way
+---------------------------------------------------------
+* **Everything that constrains a parameter value.**  The planner writes the
+  params, so a caution living only in the worker's view cannot influence what
+  gets built -- a through-hole caution was invisible to it for exactly that
+  reason.  Hence the single canonical ``SkillDef.planning_view`` rather than
+  fields formatted by hand here, which silently omits whatever nobody remembered
+  to add.
+* **A short tail of the conversation.**  With only the latest human line, a bare
+  approval was unplannable: on "yeah go ahead" -- the turn that actually builds,
+  after dimensions have been proposed -- the planner replied *"No actionable
+  model, dimensions, reference, or approved constraints are present in the
+  available conversation"* and returned an empty plan.  No plan meant no skill
+  definition reached the worker, so ``build_model_spec``'s cautions were absent on
+  the very turn that built the geometry; a missing ``expect_bbox`` was the visible
+  symptom.
 """
 
 from __future__ import annotations
@@ -24,21 +39,19 @@ from client_v2.pipeline.plan import parse_plan
 from client_v2.prompts import PROMPTS
 from client_v2.skills import SkillRegistry
 
-# How much of the conversation the planner sees.  A short tail, not the whole
-# transcript: enough to know what was proposed and approved, not enough to make
-# the planning call grow with the session.
 MAX_CONTEXT_TURNS = 3
-MAX_CONTEXT_CHARS = 1500
+# Per message, kept from the TAIL (see ``_tail``).  1500 clipped a real 1,960-char
+# proposal mid-list and lost the approval question at its end; 2400 covers that
+# with headroom.  Deliberately not larger: this multiplies by MAX_CONTEXT_TURNS*2
+# messages and the planner call is already the most expensive in a turn.
+MAX_CONTEXT_CHARS = 2400
 
 
 def planning_brief(registry: SkillRegistry) -> str:
     """The skills the planner may use, each rendered for parameter binding.
 
-    Delegates to ``SkillDef.planning_view`` -- the single canonical rendering of
-    what a planner needs (inputs, preconditions, cautions, examples).  Keeping
-    it there rather than formatting fields here is deliberate: a hand-curated
-    format silently omits any field nobody remembered to add, which is exactly
-    how a through-hole caution ended up invisible to the planner.
+    Delegates to ``SkillDef.planning_view`` -- the canonical rendering of what a
+    planner needs (inputs, preconditions, cautions, examples).  See module docs.
     """
     return "\n".join(registry.get(sid).planning_view()
                      for sid in registry.ids())
@@ -66,17 +79,10 @@ def conversation_context(state, turns: int = MAX_CONTEXT_TURNS,
                          limit: int = MAX_CONTEXT_CHARS) -> str:
     """The last few exchanges, so the planner can plan a FOLLOW-UP turn.
 
-    The planner used to receive only the latest human line.  On "yeah go ahead"
-    -- the turn that actually builds, after the agent has proposed dimensions --
-    it therefore had nothing to plan from and said so: *"No actionable model,
-    dimensions, reference, or approved constraints are present in the available
-    conversation."*  It returned an empty plan, so no skill definition reached the
-    worker, so `build_model_spec`'s cautions were absent on exactly the turn that
-    built the geometry (the missing `expect_bbox` guard is the visible symptom).
-
-    Deliberately a short tail, not the transcript: the planner needs to know what
-    was agreed, not to re-read the session.  Images are dropped -- ``message_text``
-    keeps only text blocks -- so a reference image is never resent here.
+    A short tail, not the transcript: enough to know what was agreed, not enough
+    to grow the planning call with the session.  Images are dropped --
+    ``message_text`` keeps text blocks only -- so a reference image is never
+    resent here.  See module docs for why this exists.
     """
     messages = state.get("messages") or []
     lines: list[str] = []
@@ -87,8 +93,23 @@ def conversation_context(state, turns: int = MAX_CONTEXT_TURNS,
             continue                      # tool traffic is the worker's business
         text = message_text(msg).strip()
         if text:
-            lines.append(f"{role}: {text[:limit]}")
+            lines.append(f"{role}: {_tail(text, limit)}")
     return "\n".join(lines[-turns * 2:])
+
+
+def _tail(text: str, limit: int) -> str:
+    """The LAST *limit* characters of *text*, marked when clipped.
+
+    Truncating from the head dropped the end of a long message, which is exactly
+    where the decision lives.  Measured: a 1,960-char proposal lost the trailing
+    460 chars carrying "may I use 1.6 mm as the underside perimeter-wall
+    thickness?" -- the question the user had answered yes to.  The planner, seeing
+    only the constraint list, then asserted the drawing's conflicting 1.2 mm, and
+    nothing caught it because the plan is advice rather than a contract.
+    """
+    if len(text) <= limit:
+        return text
+    return "…" + text[-limit:]
 
 
 def make_planner_node(model, registry: SkillRegistry):

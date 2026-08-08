@@ -19,6 +19,8 @@ cautions:
   - >-
     Repeat the assumptions in the final report. A model built on an assumed
     scale is only trustworthy if the reader knows which numbers were assumed.
+    Take them from the declare_assumption record rather than from memory of what
+    was said several turns ago.
   - "Never describe an unverified or failed build as finished."
 
 success_criteria:

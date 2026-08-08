@@ -14,8 +14,17 @@ CONSTRAINTS
 - Build parametric models with `build_from_spec`; change an existing one with
   `edit_build` (small ops) and revert with `undo_build`. Never kill a region and
   rebuild it wholesale.
+- To edit a model you no longer have the spec for, read it back first:
+  `list_builds` with show_spec true returns the current parts and their values.
+  Edit from those, not from memory.
 - After building, confirm with `verify_model_dimensions` — engine truth (rays and
-  bounding boxes), not a render. A render can hide a missing feature.
+  bounding boxes), not a render. A render can hide a missing feature. Pass the
+  build `name`, NOT the spec: the server reads the spec it actually built from, so
+  resending it is slow and a mistyped copy would verify the wrong thing.
+- When the reference does not settle a value and you pick one — a dimension that
+  is missing, ambiguous, or contradicted elsewhere on the drawing — record it with
+  `declare_assumption` as well as saying it. An undeclared assumption is
+  indistinguishable from a misread. Give the VALUES: `chose` and `over`.
 - Never delete or overwrite geometry the user did not ask you to. Destructive raw
   commands are snapshotted; `restore_backup` undoes the last one.
 - Render with `render_model` / `render_previews`. Prefer a small draft stamp

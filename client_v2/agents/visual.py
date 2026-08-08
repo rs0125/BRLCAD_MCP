@@ -15,6 +15,24 @@ chain and must not become load-bearing:
 * a mismatch is reported and can trigger ONE bounded revision, not an open loop;
 * it can never overturn an engine-truth PASS into silent success -- correctness
   stays with the rays, and this only adds a fidelity opinion.
+
+Three rules that keep the loop honest
+-------------------------------------
+* **Only the latest RENDERS are judged.**  ``find_render_paths`` takes the newest
+  render set, not the first one in the history.  Reading first-seen graded a
+  pre-edit render: the check reported holes that a corrective ``edit_build`` had
+  already removed, and the formatter passed that on as an unresolved discrepancy
+  on a model that was correct.
+* **Only the latest reference image is sent**, never the transcript.  Passing the
+  history resent every image attached in the session on every check, growing
+  without bound (the worker's summarisation middleware does not reach out here),
+  and the older references are not what we are comparing against.
+* **Routing turns on an explicit fact, not a counter.**  The router once compared
+  ``visual_rounds`` with ``>`` where the node used ``>=``; because the node stops
+  incrementing once its budget is spent, the counter froze one short of the
+  router's test, which therefore never fired, and the graph revised on a stale
+  verdict until it hit the recursion limit.  The node now stamps ``spent`` on a
+  mismatch it cannot re-judge, and the router reads only that.
 """
 
 from __future__ import annotations
@@ -29,37 +47,37 @@ from client_v2.agents.conversational import message_text
 from client_v2.prompts import PROMPTS
 from client_v2.terminal.attachments import attached_image_count, image_part_from_file
 
-# One visual correction round per user turn: a vision judgement is the weakest
-# signal here, so it gets far less budget than the engine-truth loop.
+# One correction round per turn: a vision judgement is the weakest signal here, so
+# it gets far less budget than the engine-truth loop.
 MAX_VISUAL_ROUNDS = 1
-# Renders to attach; more pictures crowd the comparison rather than helping.
+# More pictures crowd the comparison rather than helping.
 MAX_RENDERS = 4
 
 _PNG = re.compile(r"/[^\s'\"]+\.png")
 
 
 def find_render_paths(state) -> list[str]:
-    """PNG paths produced during this turn that exist on disk."""
+    """PNG paths from the LATEST render in this turn that exist on disk.
+
+    Newest-first, and only one render's worth.  Taking first-seen paths instead
+    graded stale geometry: a build followed by a corrective ``edit_build`` leaves
+    two render directories in the history, and the older set still shows the
+    feature the edit removed -- reported as a mismatch against a model that was
+    already correct.  One message is the right unit because a single build emits
+    its whole view set in one tool result.
+    """
     texts: list[str] = [str(v) for v in (state.get("step_outputs") or {}).values()]
     texts += [message_text(m) for m in (state.get("messages") or [])
               if isinstance(m, ToolMessage)]
-    found: list[str] = []
-    for text in texts:
-        for path in _PNG.findall(text):
-            if path not in found and os.path.isfile(path):
-                found.append(path)
-    return found
+    for text in reversed(texts):
+        found = [p for p in dict.fromkeys(_PNG.findall(text)) if os.path.isfile(p)]
+        if found:
+            return found
+    return []
 
 
 def reference_message(state):
-    """The most recent user message carrying an image, or None.
-
-    Only this one message is sent to the comparison call.  Passing the whole
-    transcript would resend EVERY image attached in the session on every check,
-    which grows without bound (the worker's summarisation middleware does not
-    apply out here) -- and the older references are not what we are comparing
-    against anyway.
-    """
+    """The most recent user message carrying an image, or None (see module docs)."""
     for msg in reversed(state.get("messages") or []):
         if attached_image_count(msg):
             return msg
@@ -90,11 +108,8 @@ def make_visual_check_node(model):
 
     async def visual_check(state):
         prior = state.get("visual")
-        # Only one place decides whether a fresh opinion is possible, and if it
-        # is not, any prior mismatch is stamped `spent` so it cannot be routed on
-        # twice.  Returning a bare {} here left a stale mismatch live in state:
-        # the node stopped judging but the router kept revising on the verdict
-        # from a round already spent, forever.
+        # One place decides whether a fresh opinion is possible; if it is not, a
+        # prior mismatch is stamped `spent` so it cannot be routed on twice.
         can_judge = (bool(renders := find_render_paths(state))
                      and has_reference_image(state)
                      and (state.get("visual_rounds") or 0) < MAX_VISUAL_ROUNDS)
@@ -120,12 +135,7 @@ def make_visual_check_node(model):
 def route_after_visual(state) -> str:
     """Send a LIVE visual mismatch back to the planner; otherwise carry on.
 
-    Deliberately reads no counter.  It used to compare ``visual_rounds`` against
-    the node's own threshold with ``>`` where the node used ``>=`` -- and because
-    the node stopped incrementing once its budget was spent, the counter froze
-    one short of the router's test, which therefore never fired.  Routing now
-    depends on a single explicit fact -- is there an unacted-on mismatch -- which
-    the node is the only thing that sets.
+    Reads no counter, on purpose -- see module docs.
     """
     visual = state.get("visual") or {}
     if visual.get("matched", True) or visual.get("spent"):

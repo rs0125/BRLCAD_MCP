@@ -207,9 +207,6 @@ class SkillRegistry:
     def get(self, skill_id: str) -> SkillDef | None:
         return self._skills.get(skill_id)
 
-    def by_kind(self, kind: SkillKind) -> list[SkillDef]:
-        return [s for s in self._skills.values() if s.kind == kind]
-
     def missing_dependencies(self, skill_id: str,
                              known_tools: Iterable[str] = ()) -> list[str]:
         """Dependency ids that resolve to neither a skill nor a known tool.

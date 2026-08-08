@@ -8,6 +8,26 @@ and decides whether the work stands or goes back to the planner for revision.
 Key rule: if nothing verifiable happened (no verdict, no error), the turn passes
 through.  Only a *contradicted* outcome triggers a kick-back, so a turn that
 never verified anything can't spin the loop.
+
+Why results are read IN ORDER
+-----------------------------
+An engine-truth PASS supersedes what went wrong before it -- every tool error so
+far, plus an earlier FAIL for the same region.  Retry-then-succeed is the most
+common shape of a successful turn: a build failed because no database was open,
+the agent found ``opendb``, retried, and the region then verified PASS with an
+exact bounding box.  Read without regard to order, that turn failed on its own
+first attempt twelve times running while the proof of success sat in the same
+transcript.
+
+A PASS clears only what PRECEDED it, so an error after the last verdict still
+fails the turn.  Known limit: one BuildSpec is one region, so a turn building two
+regions could have the second one's PASS clear the first one's tool error.  FAIL
+verdicts are cleared per-region; tool errors, which name no region, are not.
+
+Two more scars worth keeping in mind: ``[MGED_ERROR]`` counts anywhere in a
+result, but ``Error:`` only at the start of one -- matching it loosely failed
+whole successful builds that merely mentioned a problem in passing, such as a
+check render timing out.
 """
 
 from __future__ import annotations
@@ -25,27 +45,27 @@ MAX_REVISIONS = 2
 # "Verification of 'plate.r': FAIL" — emitted by verify_model_dimensions.
 _VERDICT = re.compile(r"verification of ['\"]?([\w.]+)['\"]?\s*:\s*(pass|fail)",
                       re.IGNORECASE)
+# An explicit failure TAG anywhere in a result means the tool failed; a bare
+# "Error:" only counts at the start of one (see module docs).
+_ERROR_TAGS = ("[mged_error]",)
+_ERROR_PREFIXES = ("error:",)
 # Failure-message prefixes, so a later PASS can identify what it supersedes.
 _TOOL_ERROR = "tool reported an error: "
 
 
 def _fail_msg(region: str) -> str:
     return f"engine-truth verification failed for {region}"
-# An explicit failure TAG anywhere in the output means the tool failed.
-_ERROR_TAGS = ("[mged_error]",)
-# "Error:" only counts when the result STARTS with it -- that is how our tools
-# report failure.  Matching it anywhere failed whole turns for a successful build
-# that merely mentioned a problem in passing (e.g. one check render timing out).
-_ERROR_PREFIXES = ("error:",)
+
+
+def _first_line(text: str) -> str:
+    return next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
 
 
 def _is_tool_failure(text: str) -> bool:
     """True if this tool result reports a FAILURE, not merely mentions an error."""
-    low = text.lower()
-    if any(tag in low for tag in _ERROR_TAGS):
+    if any(tag in text.lower() for tag in _ERROR_TAGS):
         return True
-    first = next((ln.strip().lower() for ln in text.splitlines() if ln.strip()), "")
-    return first.startswith(_ERROR_PREFIXES)
+    return _first_line(text).lower().startswith(_ERROR_PREFIXES)
 
 
 @dataclass
@@ -61,47 +81,47 @@ class Verdict:
                 "failures": list(self.failures)}
 
 
-def evaluate(texts: list[str]) -> Verdict:
-    """Read engine-truth verdicts and error markers out of a turn's outputs.
+def signals(texts: list[str]) -> list[tuple[str, str]]:
+    """Ordered ``(kind, detail)`` outcomes read from a turn's results.
 
-    Pure.  A FAIL verdict or an error marker fails the turn; a PASS verdict
-    marks it checked-and-good; nothing recognisable leaves it untouched
-    (``checked=False``, ``passed=True``) so the graph does not loop.
-
-    ORDER MATTERS.  *texts* is in the order the turn produced them, and an
-    engine-truth PASS **supersedes what went wrong before it** -- every tool
-    error so far, plus an earlier FAIL for the same region.  Retry-then-succeed
-    is the most common shape of a successful agent turn: a build failed because
-    no database was open, the agent found `opendb`, retried, and the region then
-    verified PASS with an exact bounding box.  Scanning without regard to order
-    failed that turn on its own first attempt, twelve times running, while the
-    proof of success sat in the same transcript.
-
-    A PASS clears only what preceded it: an error reported AFTER the last
-    verdict still fails the turn.  Known limit -- one BuildSpec is one region, so
-    a turn that builds two regions could have the second one's PASS clear the
-    first one's tool error; FAIL verdicts are cleared per-region, tool errors
-    (which do not name a region) are not.
+    *kind* is ``"pass"``/``"fail"`` (detail = the region) or ``"error"`` (detail =
+    the offending first line).  Within one result the verdicts come before the
+    error, matching how a tool writes them.  Pure reading, no judgement.
     """
-    verdict = Verdict()
+    out: list[tuple[str, str]] = []
     for text in texts:
         if not text:
             continue
-        for region, outcome in _VERDICT.findall(text):
-            verdict.checked = True
-            if outcome.lower() == "fail":
-                verdict.failures.append(_fail_msg(region))
-            else:
-                # Proof the region is right NOW: anything that went wrong on the
-                # way here was fixed, so it must not fail the turn.
-                superseded = _fail_msg(region)
-                verdict.failures = [
-                    f for f in verdict.failures
-                    if not f.startswith(_TOOL_ERROR) and f != superseded]
+        out += [(outcome.lower(), region)
+                for region, outcome in _VERDICT.findall(text)]
         if _is_tool_failure(text):
-            verdict.checked = True
-            first = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
-            verdict.failures.append(f"{_TOOL_ERROR}{first[:160]}")
+            out.append(("error", _first_line(text)[:160]))
+    return out
+
+
+def _surviving(failures: list[str], passed_region: str) -> list[str]:
+    """The failures a PASS for *passed_region* does NOT supersede."""
+    superseded = _fail_msg(passed_region)
+    return [f for f in failures
+            if not f.startswith(_TOOL_ERROR) and f != superseded]
+
+
+def evaluate(texts: list[str]) -> Verdict:
+    """Judge a turn from its ordered signals -- see module docs for why order matters.
+
+    Pure.  A FAIL verdict or an error fails the turn; a PASS supersedes what came
+    before it; nothing recognisable leaves the verdict untouched
+    (``checked=False``, ``passed=True``) so the graph does not loop.
+    """
+    verdict = Verdict()
+    for kind, detail in signals(texts):
+        verdict.checked = True
+        if kind == "fail":
+            verdict.failures.append(_fail_msg(detail))
+        elif kind == "error":
+            verdict.failures.append(f"{_TOOL_ERROR}{detail}")
+        else:                       # a pass proves the region is right NOW
+            verdict.failures = _surviving(verdict.failures, detail)
     verdict.passed = not verdict.failures
     return verdict
 

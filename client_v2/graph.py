@@ -147,33 +147,33 @@ def build_graph(
     work_entry = "planner" if registry is not None else "worker"
 
     g = StateGraph(AgentState)
-    g.add_node("intake", _logged("intake", make_intake_node(classifier), log))
-    g.add_node("worker", _logged("worker", make_worker_node(
-        worker_model, tools, worker_prompt, middleware), log))
-    g.add_node("respond", _logged("respond", make_respond_node(chat_model), log))
+
+    def add(name: str, node) -> None:
+        """Register a node under *name*, logged under the same name.
+
+        One place, so a node can never end up logged under a label that does not
+        match its edges -- and every node added later is recorded for free.
+        """
+        g.add_node(name, _logged(name, node, log))
+
+    add("intake", make_intake_node(classifier))
+    add("worker", make_worker_node(worker_model, tools, worker_prompt, middleware))
+    add("respond", make_respond_node(chat_model))
+
     if registry is not None:
-        g.add_node("planner", _logged("planner", make_planner_node(planner_model, registry), log))
-        g.add_node("executor", _logged("executor", make_executor_node(registry, tools), log))
-        g.add_node("verifier", _logged("verifier", make_verifier_node(), log))
-        # A workflow that declares an `authorize` step halts here for a real
-        # decision before anything runs: prose asking the model to pause was
-        # ignorable, an interrupt is not.
-        g.add_node("authorize", _logged("authorize", make_authorize_node(registry), log))
+        add("planner", make_planner_node(planner_model, registry))
+        add("authorize", make_authorize_node(registry))
+        add("executor", make_executor_node(registry, tools))
+        add("verifier", make_verifier_node())
+        add("visual_check", make_visual_check_node(visual_model))
+        add("formatter", make_formatter_node(formatter_model))
+
         g.add_edge("planner", "authorize")
-        # Then a deterministic plan runs in the executor; anything else (incl. no
-        # usable plan) falls through to the model-driven worker.
         g.add_conditional_edges(
             "authorize", make_planner_router(registry),
             {"executor": "executor", "worker": "worker"})
-        # Both work paths report to the verifier, which either finishes the turn
-        # or kicks the work back to the planner for a bounded revision.
         g.add_edge("executor", "verifier")
         g.add_edge("worker", "verifier")
-        g.add_node("formatter", _logged("formatter", make_formatter_node(formatter_model), log))
-        # The visual check only costs a model call when renders AND a reference
-        # image are both present; otherwise it passes straight through.
-        g.add_node("visual_check", _logged(
-            "visual_check", make_visual_check_node(visual_model), log))
         g.add_conditional_edges(
             "verifier", route_after_verification,
             {"revise": "planner", "look": "visual_check"})

@@ -6,7 +6,7 @@ a live socket or a running listener.
 """
 
 from brlcad_mcp.server.tools import snapshots as S
-from brlcad_mcp.server.tools.helpers import destructive_targets
+from brlcad_mcp.server.tools.helpers import destructive_targets, ls_names
 
 
 def test_non_destructive_commands_have_no_targets():
@@ -33,10 +33,13 @@ def test_flags_and_numbers_are_dropped():
     assert destructive_targets("kill a.s a.s") == ["a.s"]  # de-duplicated
 
 
-def test_ls_name_parsing_strips_decorations():
-    out = "bracket.r/ plate.s hole.s _GLOBAL@ sub*"
-    assert S._parse_ls_names(out) == {"bracket.r", "plate.s", "hole.s",
-                                      "_GLOBAL", "sub"}
+def test_ls_name_parsing_strips_every_decoration():
+    # Regression: 'plate.r/R' must reduce to 'plate.r', or a destructive command
+    # naming a REGION never matches the live listing and the snapshot is skipped.
+    assert ls_names("bracket.r/ plate.s hole.s _GLOBAL@ sub*") == {
+        "bracket.r", "plate.s", "hole.s", "_GLOBAL", "sub"}
+    assert ls_names("plate.r/R  body.s  sub.c/  _GLOBAL@") == {
+        "plate.r", "body.s", "sub.c", "_GLOBAL"}
 
 
 def test_manifest_listing_is_newest_first(tmp_path, monkeypatch):
@@ -57,18 +60,6 @@ def test_manifest_listing_is_newest_first(tmp_path, monkeypatch):
 
 def test_sidecar_path_pairs_with_g_file():
     assert S._sidecar_path("/x/snap_1.g") == "/x/snap_1.json"
-
-
-def test_ls_parsing_strips_region_marker():
-    # Regression: 'plate.r/R' must reduce to 'plate.r', or a destructive command
-    # naming a REGION never matches the live listing and the snapshot is skipped.
-    names = S._parse_ls_names("plate.r/R  body.s  sub.c/  _GLOBAL@")
-    assert names == {"plate.r", "body.s", "sub.c", "_GLOBAL"}
-
-
-def test_region_destructive_target_is_seen_as_live():
-    live = S._parse_ls_names("plate.r/R  body.s")
-    assert "plate.r" in live          # so `kill plate.r` gets snapshotted
 
 
 # --- globs: the command that destroys most was protected least -------------
@@ -102,7 +93,7 @@ def test_expanded_targets_are_deduplicated_in_order():
 def test_a_kill_that_removed_nothing_is_flagged():
     # MGED returned SUCCESS for `kill *` while deleting nothing; the agent only
     # found out by re-running ls itself.
-    note = S.describe_effect(["a.s", "b.s"], ["a.s", "b.s"])
+    note = S.describe_effect(["a.s", "b.s"], ["a.s", "b.s"], "kill *")
     assert "removed NOTHING" in note and "wildcard" in note
 
 
@@ -149,3 +140,62 @@ def test_old_restore_points_are_still_listed(tmp_path, monkeypatch):
     monkeypatch.setattr(S, "_legacy_backups_root", lambda: str(old))
     manifests = S._list_manifests()
     assert [m["objects"][0] for m in manifests] == ["b.s", "a.s"]   # newest first
+
+
+# --- the advice has to match the cause -------------------------------------
+
+def test_an_undeletable_artifact_tells_the_agent_to_stop_trying():
+    """THE BUG: the note always said "try naming objects explicitly".
+
+    Faced with an undeletable query_rayffff -- named explicitly already -- the
+    agent burned ten tool calls retrying kill, killall, summary, get and put,
+    because our own message implied a retry would help.  Advice that sends the
+    reader somewhere useless is worse than no advice.
+    """
+    note = S.describe_effect(["query_rayffff"], ["query_rayffff"],
+                             "kill query_rayffff")
+    assert "nirt ray leftovers" in note
+    assert "DO NOT keep trying" in note
+    assert "empty of" in note                       # how to read the database
+    assert "naming objects explicitly" not in note  # the useless advice is gone
+
+
+def test_a_glob_that_did_not_expand_still_gets_the_wildcard_advice():
+    note = S.describe_effect(["a.s", "b.s"], ["a.s", "b.s"], "kill *")
+    assert "does not appear to expand wildcards" in note
+    assert "name the objects explicitly" in note
+
+
+def test_explicitly_named_survivors_are_told_retrying_will_not_help():
+    note = S.describe_effect(["a.s", "b.s"], ["a.s", "b.s"], "kill a.s b.s")
+    assert "retrying the same command will not help" in note
+    assert "wildcard" not in note                   # not the cause here
+
+
+def test_a_partial_removal_still_lists_what_survived():
+    note = S.describe_effect(["a.s", "b.s"], ["b.s"], "kill a.s b.s")
+    assert "1 of 2" in note and "b.s" in note
+
+
+def test_ray_artifacts_are_not_snapshotted(monkeypatch):
+    # keep on a corrupt record exports nothing useful, and an undeletable
+    # artifact otherwise leaves one restore point behind per attempt (3 in a turn).
+    monkeypatch.setattr(S, "live_targets", lambda cmd: ["query_rayffff"])
+    called = []
+    monkeypatch.setattr(S, "send_command",
+                        lambda cmd: called.append(cmd) or "SUCCESS:")
+    assert S.maybe_snapshot("kill query_rayffff") is None
+    assert not any(c.startswith("keep") for c in called)
+
+
+def test_real_geometry_beside_an_artifact_is_still_saved(monkeypatch, tmp_path):
+    monkeypatch.setattr(S, "live_targets",
+                        lambda cmd: ["plate.r", "query_rayffff"])
+    monkeypatch.setattr(S, "_backups_root", lambda: str(tmp_path))
+    kept = []
+    monkeypatch.setattr(S, "send_command",
+                        lambda cmd: kept.append(cmd) or "SUCCESS:")
+    note = S.maybe_snapshot("kill plate.r query_rayffff")
+    assert note is not None and "plate.r" in note
+    keep_cmd = next(c for c in kept if c.startswith("keep"))
+    assert "plate.r" in keep_cmd and "query_rayffff" not in keep_cmd

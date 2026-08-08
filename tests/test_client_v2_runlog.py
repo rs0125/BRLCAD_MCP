@@ -157,3 +157,29 @@ def test_images_are_still_redacted_at_depth():
         "url": "data:image/png;base64," + "A" * 5000}}}}}}}}
     dumped = json.dumps(redact(nested))
     assert "<image," in dumped and "AAAA" not in dumped
+
+
+def test_encrypted_reasoning_is_stubbed_but_its_id_survives():
+    """The ciphertext is unreadable by anyone but OpenAI; the id is the trace signal."""
+    from client_v2.runlog import redact
+    item = {"id": "rs_abc123", "type": "reasoning", "summary": [],
+            "encrypted_content": "gAAAAAB" + "x" * 4993}
+    out = redact({"content": [item]})
+    logged = out["content"][0]
+    assert logged["encrypted_content"] == "<encrypted reasoning, 5000 chars>"
+    assert logged["id"] == "rs_abc123"          # continuity across a tool call
+    assert "xxxx" not in json.dumps(out)
+
+
+def test_encrypted_reasoning_reports_its_true_size_not_the_clipped_one():
+    """Measured before _MAX_STR truncation, so the number means something."""
+    from client_v2.runlog import redact
+    out = redact({"encrypted_content": "z" * 12345})
+    assert out["encrypted_content"] == "<encrypted reasoning, 12345 chars>"
+
+
+def test_a_plain_string_named_like_a_key_is_untouched():
+    """Only the keyed field is opaque -- the word itself is not a redaction trigger."""
+    from client_v2.runlog import redact
+    assert redact({"note": "encrypted_content was large"}) == {
+        "note": "encrypted_content was large"}

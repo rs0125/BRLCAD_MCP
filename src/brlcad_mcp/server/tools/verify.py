@@ -39,12 +39,14 @@ from pydantic import Field, ValidationError
 from brlcad_mcp.server.app import mcp
 from brlcad_mcp.server.tools.csg import expected_thickness
 from brlcad_mcp.server.tools.helpers import (
+    RAY_ARTIFACT_PREFIX,
     is_error_response,
+    is_ray_artifact,
     ls_names,
     parse_json_arg,
     parse_response,
 )
-from brlcad_mcp.server.tools.reconstruct import BuildSpec, Part
+from brlcad_mcp.server.tools.reconstruct import BuildSpec, Part, _latest_spec
 from brlcad_mcp.transport import send_command
 
 # Rays start well outside any plausible model and fire inward.
@@ -55,8 +57,6 @@ _BBOX_TOL_FRAC = 0.02
 # Thickness tolerance per ray: the larger of 0.5 mm or 2% of the expectation.
 _LOS_TOL_ABS = 0.5
 _LOS_TOL_FRAC = 0.02
-# nirt leaves a "query_ray<hex>" object in the database for every ray it fires.
-_RAY_ARTIFACT_PREFIX = "query_ray"
 # Grid resolution per axis for the background sweep (n x n rays per axis).
 _GRID = 3
 # How far off a cutter's centre to place its targeted edge samples, as a
@@ -139,6 +139,31 @@ def parse_bb_lengths(output: str):
         found = re.search(rf"{axis} Length:\s*([\d.eE+-]+)", output)
         dims.append(float(found.group(1)) if found else None)
     return tuple(dims)
+
+
+_EXTENT = re.compile(
+    r"min\s*\{([^}]*)\}\s*max\s*\{([^}]*)\}", re.I)
+
+
+def parse_bb_extent(output: str):
+    """Absolute (minX,minY,minZ,maxX,maxY,maxZ) from a ``bb -e`` report.
+
+    Plain ``bb`` reports LENGTHS only, which say nothing about where the model
+    sits.  ``-e`` is what gives the corner, and the corner is what lets a check
+    be written against a drawing that fixes distances from an edge without
+    fixing the origin -- which is most drawings.
+    """
+    found = _EXTENT.search(output)
+    if not found:
+        return None
+    try:
+        lo = [float(v) for v in found.group(1).split()]
+        hi = [float(v) for v in found.group(2).split()]
+    except ValueError:
+        return None
+    if len(lo) != 3 or len(hi) != 3:
+        return None
+    return (*lo, *hi)
 
 
 def bbox_matches(expected, actual) -> bool:
@@ -264,18 +289,13 @@ def cleanup_ray_artifacts(prober) -> list[str]:
     returns the whole database, we must not kill model geometry.
     """
     try:
-        listing = parse_response(prober(f"ls {_RAY_ARTIFACT_PREFIX}*"))
+        listing = parse_response(prober(f"ls {RAY_ARTIFACT_PREFIX}*"))
     except (ConnectionError, TimeoutError):
         return []
     names = sorted(n for n in ls_names(listing) if is_ray_artifact(n))
     if names:
         prober(f"kill {' '.join(names)}")
     return names
-
-
-def is_ray_artifact(name: str) -> bool:
-    """True for a nirt leftover, which is not model geometry."""
-    return name.startswith(_RAY_ARTIFACT_PREFIX)
 
 
 def _thickness_checks(spec: BuildSpec, prober, region: str):
@@ -347,13 +367,46 @@ def _format(region: str, passed: bool, checks) -> str:
     return "\n".join(lines)
 
 
+def _resolve_target(name, spec) -> tuple[dict | None, str | None]:
+    """The spec to verify against: stored (by *name*) or supplied. Pure-ish.
+
+    Exactly one input, because they can disagree and silently preferring either
+    one would make the check's meaning depend on an argument the caller may not
+    know it sent. Tolerates a leaked ``FieldInfo`` sentinel from a direct
+    (non-MCP) call by treating anything that is not str/dict as absent.
+    """
+    got_name = name.strip() if isinstance(name, str) else ""
+    got_spec = spec.strip() if isinstance(spec, str) else (
+        spec if isinstance(spec, dict) else "")
+    if got_name and got_spec:
+        return None, ("Error: pass 'name' OR 'spec', not both -- they can "
+                      "disagree, and which one wins would change what is being "
+                      "verified. Use 'name' for a model this server built.")
+    if not got_name and not got_spec:
+        return None, ("Error: pass 'name' (preferred -- the region's build name, "
+                      "whose stored spec the server reads) or 'spec' (a full JSON "
+                      "spec, for a model this server did not build).")
+    if got_name:
+        stored = _latest_spec(got_name)
+        if stored is None:
+            return None, (f"Error: no saved build named '{got_name}'. Use "
+                          f"list_builds to see stored names, or pass 'spec'.")
+        return stored, None
+    return parse_json_arg(got_spec, "spec")
+
+
 @mcp.tool()
 def verify_model_dimensions(
+    # NOTE: ``spec`` stays FIRST so existing positional callers keep working.
+    # With ``name`` first, a positional dict landed in ``name``, was rejected as
+    # not-a-string, and the call became a no-op -- a silent failure if the
+    # both/neither guard below had not caught it.
     spec: str | dict = Field(
-        ...,
+        default="",
         description=(
-            "The SAME JSON spec used to build the model. Verifies the built "
-            "region against it with BRL-CAD's own raytracer, NOT a render: it "
+            "A full JSON spec, for a model this server did NOT build (or a "
+            "hypothetical one). Prefer 'name' when the build is stored. Verifies "
+            "the built region with BRL-CAD's own raytracer, NOT a render: it "
             "checks the region exists, its bounding box is right, and that "
             "along dozens of sample rays the model contains exactly the "
             "material the spec implies -- which catches missing subtractions, "
@@ -361,9 +414,27 @@ def verify_model_dimensions(
             "depth, for any shape. Returns PASS/FAIL with per-check detail."
         ),
     ),
+    name: str = Field(
+        default="",
+        description=(
+            "PREFERRED whenever build_from_spec or edit_build made the model: the "
+            "build name (no '.r'). The server reads the spec it ACTUALLY built "
+            "from, so you do not resend it -- faster, and it cannot verify "
+            "against a mistyped copy."
+        ),
+    ),
 ) -> str:
-    """Verify a built model matches its spec using engine truth (bb + nirt)."""
-    data, err = parse_json_arg(spec, "spec")
+    """Verify a built model matches its spec using engine truth (bb + nirt).
+
+    Two ways in, and they are NOT equivalent. ``name`` reads the stored spec --
+    the one ``build_from_spec``/``edit_build`` actually used -- so the check is
+    against ground truth. ``spec`` verifies against whatever is supplied, which is
+    needed for a model this server did not build, but note that the sample rays
+    and the expected bbox are derived from the ARGUMENT: a resent spec that
+    drifted from the stored one moves the goalposts rather than failing, so the
+    tool can report PASS against a spec that is not the one on disk.
+    """
+    data, err = _resolve_target(name, spec)
     if err:
         return err
     try:

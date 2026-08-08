@@ -186,90 +186,45 @@ async def test_the_graph_actually_halts_on_a_wipe_request():
     assert "DESTROY" in str(pauses[0].value["authorize"])
 
 
-# --- confirm dimensions before building from a drawing ---------------------
+# --- what does NOT justify a halt ------------------------------------------
 
-from client_v2.agents.authorize import (  # noqa: E402
-    SKETCH_QUESTION,
-    plan_builds_geometry,
-    turn_has_reference_image,
-)
+def test_building_from_a_drawing_is_deliberately_not_gated():
+    """A gate here was added and then removed on purpose. Do not re-add it.
 
-_BUILDS = SkillRegistry({
-    "build_model_spec": SkillDef.model_validate({
+    A halt has to earn its cost: the action is hard to undo, or it needs
+    information only the user has.  A build is neither -- it writes a versioned
+    spec and undo_build reverts it, and the dimensions are printed on the drawing.
+    Asking "confirm these numbers?" while the user looks at the same drawing buys
+    a rubber stamp, and over-gating trains people to say yes, which costs us the
+    gates that do matter.  expect_bbox is the real guard: machine-checked, so a
+    misread size REJECTS the build instead of being confirmed by a glance.
+    """
+    registry = SkillRegistry({"build_model_spec": SkillDef.model_validate({
         "id": "build_model_spec", "description": "builds",
-        "steps": [{"call": "build_from_spec", "with": {"spec": "${spec}"}}]}),
-    "ingest_drawing": SkillDef.model_validate({
-        "id": "ingest_drawing", "description": "just looks",
-        "steps": [{"understand": ["describe the part"]}]}),
-})
-_BUILD_PLAN = {"steps": [{"skill": "build_model_spec", "params": {}}]}
-_LOOK_PLAN = {"steps": [{"skill": "ingest_drawing", "params": {}}]}
+        "steps": [{"call": "build_from_spec", "with": {"spec": "${spec}"}}]})})
+    plan = {"steps": [{"skill": "build_model_spec", "params": {}}]}
+    for request in ("model this drawing", "go ahead just draw this",
+                    "build the bracket from the image"):
+        assert authorization_request(plan, registry, request) is None, request
 
 
-def _img_turn(extra=0):
-    msgs = [HumanMessage(content=[
-        {"type": "text", "text": "model this"},
-        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}}])]
-    msgs += [AIMessage(content="ok")] * extra
-    return {"messages": msgs, "turn_start": 1}
-
-
-def test_geometry_building_is_detected_from_the_skills_call_steps():
-    assert plan_builds_geometry(_BUILD_PLAN, _BUILDS)
-    assert not plan_builds_geometry(_LOOK_PLAN, _BUILDS)
-
-
-def test_a_reference_image_this_turn_is_detected():
-    assert turn_has_reference_image(_img_turn())
-    assert not turn_has_reference_image(
-        {"messages": [HumanMessage(content="text only")], "turn_start": 1})
-    assert not turn_has_reference_image({})
-
-
-def test_building_straight_from_a_fresh_drawing_is_gated():
-    # THE BUG: only model_from_dimensioned_sketch declares an authorize step, so
-    # a planner that picked its sub-skills directly bypassed the gate. The agent
-    # paused anyway because it chose to -- that is not a safety property.
-    assert authorization_request(_BUILD_PLAN, _BUILDS, "model this",
-                                 new_reference_image=True) == SKETCH_QUESTION
-
-
-def test_merely_reading_a_drawing_is_not_gated():
-    assert authorization_request(_LOOK_PLAN, _BUILDS, "model this",
-                                 new_reference_image=True) is None
-
-
-def test_a_later_turn_does_not_re_ask_about_the_same_drawing():
-    # The numbers were confirmed on the turn that carried the image; building on
-    # a follow-up ("yeah go ahead") must not stop again.
-    assert authorization_request(_BUILD_PLAN, _BUILDS, "yeah go ahead",
-                                 new_reference_image=False) is None
-
-
-def test_a_skill_declared_authorize_step_still_takes_precedence():
-    registry = SkillRegistry({"w": SkillDef.model_validate({
-        "id": "w", "description": "workflow",
-        "steps": [{"authorize": "confirm the plan"},
-                  {"call": "build_from_spec", "with": {}}]})})
-    q = authorization_request({"steps": [{"skill": "w"}]}, registry, "go",
-                              new_reference_image=True)
-    assert q == "confirm the plan"
-
-
-async def test_the_graph_halts_before_building_from_an_image():
-    from langchain_core.tools import tool as _tool
-
-    @_tool
+async def test_an_image_build_runs_without_stopping():
+    @tool
     def build_from_spec(spec: str) -> str:
         """Builds."""
-        raise AssertionError("must not build before the dimensions are confirmed")
+        return "Built region 'x.r' from 1 part(s)"
 
+    registry = SkillRegistry({"build_model_spec": SkillDef.model_validate({
+        "id": "build_model_spec", "description": "builds",
+        "steps": [{"call": "build_from_spec", "with": {"spec": "${spec}"}}]})})
     graph = build_graph(
         worker_model=FakeToolCallingModel(responses=[]),
-        planner_model=FakeToolCallingModel(responses=[
-            AIMessage(content='{"steps": [{"skill": "build_model_spec", '
-                              '"params": {"spec": "x"}}]}')] * 4),
-        tools=[build_from_spec], worker_prompt="unused", registry=_BUILDS,
+        planner_model=FakeToolCallingModel(responses=[AIMessage(
+            content='{"steps": [{"skill": "build_model_spec", '
+                    '"params": {"spec": "x"}}]}')] * 4),
+        formatter_model=FakeToolCallingModel(
+            responses=[AIMessage(content="done")] * 4),
+        tools=[build_from_spec], worker_prompt="unused", registry=registry,
         classifier=lambda t: "work", checkpointer=MemorySaver())
 
     result = await graph.ainvoke(
@@ -277,8 +232,7 @@ async def test_the_graph_halts_before_building_from_an_image():
             {"type": "text", "text": "model this"},
             {"type": "image_url",
              "image_url": {"url": "data:image/png;base64,AA"}}])]},
-        {"configurable": {"thread_id": "sketch"}})
+        {"configurable": {"thread_id": "img"}})
 
-    pauses = result.get("__interrupt__") or ()
-    assert pauses, "building from a fresh drawing must stop for confirmation"
-    assert "dimensions" in str(pauses[0].value["authorize"])
+    assert not (result.get("__interrupt__") or ())      # no rubber-stamp pause
+    assert result["step_outputs"]["build_model_spec"].startswith("Built region")

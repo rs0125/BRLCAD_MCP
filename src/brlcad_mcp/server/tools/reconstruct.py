@@ -194,11 +194,18 @@ def _hole_intent_errors(spec: BuildSpec) -> list[str]:
         spans = [i for i in range(3)
                  if cut[i] <= local[i] and cut[i + 3] >= local[i + 3]]
         if p.hole == "through" and not spans:
+            # Pocket first, deliberately.  With the geometry advice leading and
+            # 'pocket' parenthesised, models twice lengthened the cutter instead --
+            # which punched through a face that was meant to stay solid, and took a
+            # build+verify cycle to notice and revert.  A cutter that stops inside
+            # the material on every axis is far more often a mislabelled blind
+            # recess than a through-hole that needs growing.
             errors.append(
                 f"'{p.name}': declared hole 'through' but the cutter stops "
                 f"inside the material on every axis, so it would leave a blind "
-                f"pocket -- move its centre outside the near face and enlarge it "
-                f"past the far face (or declare hole 'pocket')")
+                f"pocket -- if that recess is what you meant, declare hole "
+                f"'pocket'; if it really must exit the far side, move its centre "
+                f"outside the near face and enlarge it past the far face")
         if p.hole == "pocket" and spans:
             errors.append(
                 f"'{p.name}': declared hole 'pocket' but the cutter crosses the "
@@ -368,7 +375,15 @@ def _render_checks(region: str, views: list[str], size: int):
 # an editable, revertable document -- not something you must fully re-specify.
 
 def _specs_root() -> str:
-    return os.path.join(settings.render.output_dir, "specs")
+    """Where saved build specs live.
+
+    Defaults under the render folder for backwards compatibility -- moving it
+    unconditionally would orphan an existing store -- but ``BRLCAD_SPEC_DIR``
+    takes it elsewhere.  Worth setting: the render folder is a cache, and a saved
+    spec is the only record of what a build actually was.
+    """
+    return settings.render.spec_dir or os.path.join(
+        settings.render.output_dir, "specs")
 
 
 def _name_dir(name: str) -> str:
@@ -448,8 +463,12 @@ def _apply_edits(parts: list[dict], edits: list[dict]):
                 errors.append(f"update: no part '{e.get('name')}'")
             else:
                 # 'op' here is the PART's boolean role (add/subtract), safe to
-                # set because the edit action lives under 'action'.
-                for k in ("center", "size", "height", "radius", "op", "shape"):
+                # set because the edit action lives under 'action'.  'hole' is
+                # updatable too: it is the through/pocket intent assertion the
+                # verifier leans on, so a wrong annotation had to be fixable
+                # without re-specifying the whole model.
+                for k in ("center", "size", "height", "radius", "op", "shape",
+                          "hole"):
                     if k in e:
                         p[k] = e[k]
         else:
@@ -651,8 +670,24 @@ def undo_build(
 @mcp.tool()
 def list_builds(
     name: str = Field(..., description="Region name to list saved versions for."),
+    show_spec: bool = Field(
+        default=False,
+        description=(
+            "If true, also return the FULL JSON spec of the current version -- "
+            "every part with its centre, size, radius and boolean role. Use this "
+            "before edit_build when you do not already have the spec in front of "
+            "you, so an edit can target real current values instead of guesses."
+        ),
+    ),
 ) -> str:
-    """List the saved versions of a build (oldest first), with part counts."""
+    """List the saved versions of a build, and optionally read the current spec.
+
+    The saved spec is the source of truth for a build -- edit_build applies ops to
+    it and regenerates the geometry -- so being able to READ it back matters: the
+    part names are in the build report, but the current coordinates are not, and
+    without them a revision after the spec has left the agent's context can only
+    guess or re-specify the whole model.
+    """
     versions = _versions(name)
     if not versions:
         return f"No saved builds named '{name}'."
@@ -663,4 +698,14 @@ def list_builds(
         except (OSError, ValueError):
             n = "?"
         lines.append(f"  v{i:03d}: {n} part(s)")
+    if show_spec:
+        try:
+            current = _load_spec(versions[-1])
+        except (OSError, ValueError) as exc:
+            lines.append(f"(could not read the current spec: {exc})")
+        else:
+            lines.append(f"\nCurrent spec (v{len(versions):03d}):")
+            lines.append(json.dumps(current, indent=2))
+            lines.append("Change it with edit_build (send only the ops, not this "
+                         "whole spec).")
     return "\n".join(lines)

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, TypedDict
 
-from langchain_core.messages import AnyMessage, HumanMessage
+from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
 
 
@@ -20,8 +20,8 @@ class AgentState(TypedDict, total=False):
 
     ``messages`` is always present (the conversation, appended via add_messages).
     The rest are optional and filled in as the pipeline grows:
-    ``route`` (intake's work/chat decision), ``plan`` (planner), ``artifacts``
-    (worker outputs), ``verification`` (verifier verdict).
+    ``route`` (intake's work/chat decision), ``plan`` (planner), ``verification``
+    (verifier verdict).
     """
 
     messages: Annotated[list[AnyMessage], add_messages]
@@ -35,19 +35,14 @@ class AgentState(TypedDict, total=False):
     plan: Any
     step_outputs: dict[str, Any]
     step_errors: list[str]
-    artifacts: list[Any]
     verification: Any
     revisions: int
     visual: Any
     visual_rounds: int
     # Set once the turn's authorization gate has been passed (or was not needed),
-    # with whatever the user answered.
+    # with whatever the user answered.  ``authorization`` is deliberately not read
+    # by any code: it exists so the run log's ``authorize`` node write records what
+    # the user actually approved.  Do not delete it as dead -- that record is the
+    # only place a halt's answer is preserved.
     authorized: bool
     authorization: str
-
-
-def initial_state(user_input: str | AnyMessage) -> AgentState:
-    """Build a fresh state for one user turn from text or a prepared message."""
-    msg = HumanMessage(content=user_input) if isinstance(user_input, str) \
-        else user_input
-    return {"messages": [msg]}

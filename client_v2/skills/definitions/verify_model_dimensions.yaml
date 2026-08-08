@@ -8,22 +8,23 @@ description: >
 
 io:
   inputs:
-    - {name: spec, type: BuildSpec, unit: mm, required: true}
+    - {name: name, type: text, required: true}
   outputs:
     - {name: verdict, type: text}
 
 preconditions:
-  - "the region named in the spec has already been built"
+  - "the region has already been built by build_from_spec or edit_build, so its spec is stored"
 
 dependencies:
   - verify_model_dimensions
 
 steps:
-  - {call: verify_model_dimensions, with: {spec: "${spec}"}}
+  - {call: verify_model_dimensions, with: {name: "${name}"}}
 
 cautions:
   - "Engine truth, not vision: a hole hidden by camera angle still passes, and a hole that failed to cut is caught -- unlike a render."
   - "The through-hole ray check assumes cylindrical subtracts are through-holes, not blind pockets."
+  - "Pass the build NAME, not a spec. The rays and expected bbox are derived from whatever spec the tool is given, so a resent copy that drifted verifies against the wrong target instead of failing. Only pass 'spec' for a model this server did not build."
 
 success_criteria:
   - "verdict starts with 'Verification ... : PASS'"

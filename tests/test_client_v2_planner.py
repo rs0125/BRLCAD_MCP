@@ -204,3 +204,27 @@ def test_tool_traffic_is_left_out():
 def test_no_history_yields_no_context_block():
     from client_v2.agents.planner import conversation_context
     assert conversation_context({}) == ""
+
+
+def test_context_keeps_the_tail_of_a_long_message_not_the_head():
+    """Decisions live at the END of a proposal, so head-truncation drops them.
+
+    Measured on a real run: a 1,960-char proposal lost the trailing 460 chars
+    carrying the approval question, and the planner then asserted the drawing's
+    conflicting value instead of the one the user had approved.
+    """
+    from client_v2.agents.planner import conversation_context
+    proposal = ("Printed constraints:\n" + "x" * 3000
+                + "\nMay I use 1.6 mm as the perimeter-wall thickness?")
+    state = {"messages": [HumanMessage(content="draw this"),
+                          AIMessage(content=proposal)]}
+    out = conversation_context(state, turns=3, limit=2400)
+    assert "1.6 mm as the perimeter-wall thickness" in out
+    assert out.endswith("?")
+    assert "…" in out                      # clipping is marked, not silent
+
+
+def test_short_messages_are_passed_through_unclipped():
+    from client_v2.agents.planner import conversation_context
+    state = {"messages": [HumanMessage(content="the depth")]}
+    assert conversation_context(state) == "User: the depth"

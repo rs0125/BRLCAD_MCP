@@ -64,6 +64,24 @@ _NON_OBJECT_TOKENS: set[str] = {"u", "-", "+", "n"}
 
 _GLOB_CHARS = "*?["
 
+# MGED's nirt leaves a "query_ray<hex>" entry behind for every ray it fires.
+# These are NOT model geometry, they cannot be read (`l` and `get` both fail on
+# them), and on this build they survive their own `kill` AND `killall` -- the
+# directory entry persists with no valid record behind it.  Shared here because
+# both the verifier (which creates them) and execute_command (which has to explain
+# them) need the same definition.
+RAY_ARTIFACT_PREFIX = "query_ray"
+
+
+def has_glob(text: str) -> bool:
+    """True if *text* contains a shell-style wildcard."""
+    return any(ch in text for ch in _GLOB_CHARS)
+
+
+def is_ray_artifact(name: str) -> bool:
+    """True for a nirt leftover, which is not model geometry."""
+    return name.startswith(RAY_ARTIFACT_PREFIX)
+
 
 def expand_targets(candidates: list[str], live: set[str]) -> list[str]:
     """Live object names *candidates* would hit, with globs expanded (pure).
@@ -79,7 +97,7 @@ def expand_targets(candidates: list[str], live: set[str]) -> list[str]:
     for candidate in candidates:
         matches = (sorted(n for n in live
                           if fnmatch.fnmatchcase(n, candidate))
-                   if any(ch in candidate for ch in _GLOB_CHARS)
+                   if has_glob(candidate)
                    else ([candidate] if candidate in live else []))
         for name in matches:
             if name not in seen:
@@ -202,7 +220,8 @@ def ls_names(ls_output: str) -> set[str]:
     ``ls`` marks combinations with a trailing ``/`` and regions with ``/R``
     (e.g. ``plate.r/R``), plus ``@``/``*`` flags.  Anything comparing names
     against the live database must strip these first -- otherwise a lookup for
-    ``plate.r`` never matches the listed ``plate.r/R``.
+    ``plate.r`` never matches the listed ``plate.r/R``, and a destructive command
+    naming a REGION has its snapshot silently skipped.
     """
     return {tok.split("/")[0].rstrip("@*")
             for tok in ls_output.split()} - {""}

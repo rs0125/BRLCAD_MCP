@@ -432,3 +432,7 @@ __marimo__/
 
 # Local design notes (not for the repo)
 client_v2/DESIGN.md
+client_v2/TODO.md
+
+# Eval run artifacts: logs, renders, exported models, reports
+evals/runs/

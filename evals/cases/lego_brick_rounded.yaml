@@ -2,7 +2,7 @@
 # rounded figures: 32 x 16 instead of 31.8 x 15.8.  A discrimination test: the
 # model must use the numbers on THIS drawing, not the Lego standard it may know.
 id: lego_brick_rounded
-image: ~/Downloads/test_brlcad_images/lego3.jpg
+image: lego3.jpg
 prompt: >-
   Model the Lego brick in this drawing, named ev_lego_round, using exactly the
   dimensions printed on THIS drawing even if you know the real part differs.

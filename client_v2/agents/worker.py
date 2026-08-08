@@ -1,20 +1,22 @@
-"""The worker agent — the only agent with tool access.
+"""The worker agent -- the only agent with tool access.
 
-Built on LangChain 1.x ``create_agent`` (the supported replacement for the
-deprecated ``langgraph.prebuilt.create_react_agent``).  Middleware (e.g. the
-SkillsMiddleware) is how dynamic behavior — like injecting skill definitions
-into the system prompt — is added, per LangChain's v1 guidance.
+Built on LangChain 1.x ``create_agent``, with middleware as the mechanism for
+dynamic behaviour (the SkillsMiddleware injects skill definitions into the system
+prompt).  Model, tools and middleware are injected, so the node runs offline
+against a fake tool-calling model and in-process tools.
 
-The worker's subagent state carries the planner's ``plan`` and ``active_skill``
-so the SkillsMiddleware can inject the plan plus the definitions of the skills it
-names; the outer graph passes them in on each invocation.
-
-Model, tools, and middleware are injected so the node is testable offline with
-a fake tool-calling model and in-process tools.
-
-Note: the old sliding-window ``pre_model_hook`` is intentionally dropped here;
-context management moves to middleware (e.g. SummarizationMiddleware) in a later
-increment rather than a bespoke hook.
+Notes
+-----
+* **Async only.**  MCP tools are async-only StructuredTools; a sync ``invoke``
+  raises "does not support sync invocation".
+* **History is summarised, not truncated.**  A long modelling session accumulates
+  large tool results (spec JSON, render paths, verification reports), so it has to
+  be bounded or cost and latency grow until the window overflows.  Summarising
+  beats the blunt sliding window v1 used: older turns are condensed rather than
+  discarded, and the middleware keeps AI/Tool call pairs together.
+* **The prompt is resolved once here**, because ``create_agent`` wants a string.
+  That only matters on the registry-less path -- whenever skills are loaded the
+  SkillsMiddleware supplies the prompt instead, re-read on every model call.
 """
 
 from __future__ import annotations
@@ -28,11 +30,6 @@ from langchain.agents.middleware import SummarizationMiddleware
 from client_v2.prompts import resolve
 from client_v2.state import AgentState
 
-# Context management.  A long modelling session accumulates large tool results
-# (spec JSON, render paths, verification reports), so history has to be bounded
-# or cost and latency grow without limit until the model's window overflows.
-# Summarising beats the blunt sliding window v1 used: older turns are condensed
-# rather than discarded, and the middleware keeps AI/Tool call pairs together.
 SUMMARISE_AT_TOKENS = 60_000
 KEEP_RECENT_MESSAGES = 12
 
@@ -64,12 +61,6 @@ def make_worker_node(model, tools, system_prompt=None, middleware=None):
 
     Returns only the messages the agent newly produced, which add_messages
     appends to the shared graph state.
-
-    ``system_prompt`` may be text, a callable, or None for the prompt library's
-    ``worker`` entry.  It is resolved once, here, because create_agent wants a
-    string -- and it only matters on the registry-less path, since the
-    SkillsMiddleware supplies the prompt (re-read per call) whenever skills are
-    loaded.
     """
     agent = create_agent(
         model=model,
@@ -80,16 +71,12 @@ def make_worker_node(model, tools, system_prompt=None, middleware=None):
     )
 
     async def worker(state: AgentState) -> AgentState:
-        # Async invocation is required: MCP tools are async-only StructuredTools,
-        # and sync invoke raises "does not support sync invocation".  Pass the
-        # planner-selected skill through so the SkillsMiddleware can inject it.
         msgs = state.get("messages", [])
         result = await agent.ainvoke({
             "messages": msgs,
             "active_skill": state.get("active_skill"),
             "plan": state.get("plan"),
         })
-        new_messages = result["messages"][len(msgs):]
-        return {"messages": new_messages}
+        return {"messages": result["messages"][len(msgs):]}
 
     return worker

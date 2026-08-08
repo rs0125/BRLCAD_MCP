@@ -5,18 +5,26 @@ Wires the production dependencies into the graph: the Responses-API model
 registry (loaded from client_v2/skills/), and the thin role prompts from
 client_v2.prompts (the v1 monolith is no longer used).
 
-``/trace`` toggles watching what the agent is doing instead of only its final
-answer: model replies and tool calls/results printed live as they happen
-(including inside the worker's tool loop), plus one line per node as it finishes
-showing the state it wrote -- the route, the plan, the verdict.  It is a runtime
-toggle because the moment you want it is right after a turn that surprised you,
-and restarting would discard the conversation.  ``CLIENT_V2_DEBUG=true`` sets the
-starting state for a session.
-
 ``/image`` and ``/paste`` attach a reference image -- the input the
 model_from_dimensioned_sketch workflow works from.  ``/skills`` and ``/prompts``
 list what is loaded, and ``/reload`` re-reads both from disk, so a skill or a
 prompt file can be edited and retried without restarting the session.
+
+The trace (``/trace``, or ``CLIENT_V2_DEBUG`` for the starting state)
+--------------------------------------------------------------------
+Shows model replies and tool calls/results live as they happen -- including inside
+the worker's own tool loop -- plus one line per node as it finishes, carrying the
+state it wrote: the route, the plan, the verdict.
+
+* It is a **runtime** toggle, not launch-only.  The moment you want it is right
+  after a turn that surprised you, and restarting to get it would throw away the
+  conversation the model has been building on.
+* The live lines come from a LangChain callback (``LiveTrace``), because node
+  updates alone cannot show the worker's loop: that loop is a nested invocation
+  which surfaces only once it has already finished.
+* Streaming therefore covers OUTER nodes only, and prints them without their
+  messages.  Including subgraphs added a 36-char UUID namespace per line and
+  repeated activity the callback had already shown above it.
 """
 
 from __future__ import annotations
@@ -69,84 +77,62 @@ def _pending_question(result) -> str | None:
     return None
 
 
-async def _drive(graph, inputs, config, log=None):
-    """Run a turn, answering any authorization halt from the user.
+def _ask_and_resume(question: str, log=None) -> Command:
+    """Surface an authorization halt and build the resume command.
 
-    A workflow that declares an `authorize` step genuinely stops the graph, so
-    the REPL has to surface the question and resume with the answer instead of
-    the turn silently ending.
+    Shared by both turn paths: streaming ends at a halt just as ainvoke does, so
+    asking and resuming was written out twice before.
     """
-    result = await graph.ainvoke(inputs, config)
-    while (question := _pending_question(result)) is not None:
-        print(f"\nAI needs a decision: {question}")
-        try:
-            answer = input("You: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            answer = "cancel"
-        if log:
-            log.event("interrupt", question=question, answer=answer)
-        result = await graph.ainvoke(Command(resume=answer or "approved"), config)
-    return result
+    print(f"\nAI needs a decision: {question}")
+    try:
+        answer = input("You: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        answer = "cancel"
+    if log:
+        log.event("interrupt", question=question, answer=answer)
+    return Command(resume=answer or "approved")
 
 
-async def _run_turn(graph, inputs, config, debug: bool, log=None) -> None:
-    """Invoke one turn; stream a node-by-node trace when debug is on."""
-    if not debug:
-        result = await _drive(graph, inputs, config, log)
-        answer = _last_ai_text(result)
-        if log:
-            log.event("result", answer=answer)
-        print(f"\nAI: {answer}")
-        return
-
-    print("\n--- trace ---")
-    final = None
-    payload = inputs
-    while payload is not None:
-        # Outer nodes only (no `subgraphs=True`): the worker's internal nodes --
-        # 'model', 'tools', a middleware hook -- used to be the only window into
-        # its loop, but LiveTrace now reports that loop as it runs, with the role
-        # as the label.  Streaming them too added a 36-char UUID namespace per
-        # line and repeated message counts for activity already shown above them.
-        async for update in graph.astream(
-                payload, config, stream_mode="updates"):
-            for node, node_update in update.items():
-                # Messages were already printed live by the LiveTrace callback in
-                # `config`; repeating them here would double every line.
-                print(format_update(node, node_update,
-                                    include_messages=False))
-                final = node_update
-        # Streaming ends at a halt too, so ask and resume the same way.
-        state = await graph.aget_state(config)
-        question = _pending_question({"__interrupt__": state.interrupts})
-        if question is None:
-            payload = None
-            continue
-        print(f"\nAI needs a decision: {question}")
-        try:
-            answer = input("You: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            answer = "cancel"
-        if log:
-            log.event("interrupt", question=question, answer=answer)
-        payload = Command(resume=answer or "approved")
-    print("--- end trace ---")
-    # The final state is recoverable from the checkpointer for the answer line.
-    snapshot = await graph.aget_state(config)
-    answer = _last_ai_text(snapshot.values)
+def _announce(answer: str, log=None) -> None:
     if log:
         log.event("result", answer=answer)
     print(f"\nAI: {answer}")
-    _ = final
 
 
-async def run() -> None:
-    worker_model = build_model()
-    registry = SkillRegistry.from_dir()
-    log = open_run_log()
+async def _run_plain(graph, inputs, config, log=None) -> None:
+    """One turn, final answer only."""
+    result = await graph.ainvoke(inputs, config)
+    while (question := _pending_question(result)) is not None:
+        result = await graph.ainvoke(_ask_and_resume(question, log), config)
+    _announce(_last_ai_text(result), log)
 
-    print("Starting client-v2 MCP client...")
-    client = MultiServerMCPClient({
+
+async def _run_traced(graph, inputs, config, log=None) -> None:
+    """One turn, printing each node as it finishes."""
+    print("\n--- trace ---")
+    payload = inputs
+    while payload is not None:
+        async for update in graph.astream(payload, config,
+                                          stream_mode="updates"):
+            for node, node_update in update.items():
+                print(format_update(node, node_update, include_messages=False))
+        state = await graph.aget_state(config)
+        question = _pending_question({"__interrupt__": state.interrupts})
+        payload = _ask_and_resume(question, log) if question else None
+    print("--- end trace ---")
+    # The final state comes back from the checkpointer for the answer line.
+    snapshot = await graph.aget_state(config)
+    _announce(_last_ai_text(snapshot.values), log)
+
+
+async def _run_turn(graph, inputs, config, debug: bool, log=None) -> None:
+    run_turn = _run_traced if debug else _run_plain
+    await run_turn(graph, inputs, config, log)
+
+
+def _mcp_client() -> MultiServerMCPClient:
+    """The stdio MCP server subprocess -- importing its tools registers them."""
+    return MultiServerMCPClient({
         "brlcad_server": {
             "command": sys.executable,
             "args": ["-m", "brlcad_mcp.server"],
@@ -155,89 +141,89 @@ async def run() -> None:
         }
     })
 
-    async with client.session("brlcad_server") as session:
-        tools = await load_mcp_tools(session)
-        print(f"Loaded {len(tools)} tool(s) from BRL-CAD; "
-              f"{len(registry.ids())} skill(s).")
 
-        graph = build_graph(
-            worker_model=worker_model,
-            tools=tools,
-            registry=registry,
-            checkpointer=MemorySaver(),
-            log=log,
-        )
-        # The callbacks capture every model call, including the ones the worker
-        # makes inside its own tool loop.  LiveTrace rides the same propagation to
-        # PRINT that activity as it happens -- node updates alone cannot, because
-        # the worker's loop is a nested invocation that surfaces only once it has
-        # finished.
-        base_callbacks = log.callbacks()
-        live = LiveTrace()
-        # Tracing is a PER-TURN choice, not a launch-time one.  You want to see
-        # the next turn precisely when the last one surprised you, and an
-        # env-var-only switch means restarting -- throwing away the conversation
-        # the model has been building on -- to answer "what did it just do?".
-        tracing = settings.debug
-        config = {"configurable": {"thread_id": "v2"},
-                  "recursion_limit": _RECURSION_LIMIT,
-                  "callbacks": list(base_callbacks)}
+async def _repl(graph, registry, log, base_callbacks, tracing: bool) -> None:
+    """Read a line, run a turn, repeat.  Kept apart from the session setup."""
+    live = LiveTrace()
+    config = {"configurable": {"thread_id": "v2"},
+              "recursion_limit": _RECURSION_LIMIT,
+              "callbacks": list(base_callbacks)}
+
+    # Local commands, keyed by name; each returns what to print.  `trace` is
+    # toggled below before its line is rendered, and the lambda closes over the
+    # variable so it reports the new state.
+    commands = {
+        "help": lambda: HELP,
+        "skills": lambda: registry.catalog(),
+        "prompts": lambda: PROMPTS.catalog(),
+        # Both are edit-then-retry surfaces, so one command re-reads both.
+        "reload": lambda: f"{registry.reload()}\n{PROMPTS.reload()}",
+        "trace": lambda: (
+            f"  trace {'on' if tracing else 'off'}"
+            + ("  -- re-run your last request to watch it" if tracing else "")),
+    }
+
+    while True:
+        try:
+            text = input("\nYou: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nGoodbye!")
+            return
+        if not text:
+            continue
+        try:
+            parsed = parse_input(text)
+        except ValueError as exc:
+            print(f"  {exc}")
+            continue
+        if isinstance(parsed, ReplCommand):
+            if parsed.name == "quit":
+                return
+            if parsed.name == "trace":
+                tracing = not tracing
+            print(commands[parsed.name]())
+            continue
+
+        message = (HumanMessage(content=parsed[1])
+                   if isinstance(parsed, tuple) else parsed)
+        if attached := attached_image_count(message):
+            print(f"  (attached {attached} image(s))")
+        log.start_turn(text, images=attached)
+        # Rebuilt per turn so /trace takes effect on the very next one.
+        config["callbacks"] = base_callbacks + ([live] if tracing else [])
+        try:
+            await _run_turn(graph, {"messages": [message]}, config, tracing, log)
+        except Exception as exc:   # keep the REPL alive on any turn failure
+            print(f"\nAI: that turn failed ({type(exc).__name__}: {exc}).")
+
+
+async def run() -> None:
+    worker_model = build_model()
+    registry = SkillRegistry.from_dir()
+    log = open_run_log()
+    tracing = settings.debug
+
+    print("Starting client-v2 MCP client...")
+    async with _mcp_client().session("brlcad_server") as session:
+        tools = await load_mcp_tools(session)
+        graph = build_graph(worker_model=worker_model, tools=tools,
+                            registry=registry, checkpointer=MemorySaver(),
+                            log=log)
         log.event("session", tools=len(tools), skills=len(registry.ids()),
                   model=settings.llm.model)
+
+        print(f"Loaded {len(tools)} tool(s) from BRL-CAD; "
+              f"{len(registry.ids())} skill(s).")
         if log.path:
             print(f"run log: {log.path}")
-
         print("=" * 49)
         print(" client-v2 active. /help for commands, 'exit' to quit.")
         # Stated rather than merely available: an opt-in trace nobody knows about
         # is a trace nobody uses.
         print(f" trace is {'ON' if tracing else 'off'} -- /trace to toggle.")
         print("=" * 49)
-        while True:
-            try:
-                text = input("\nYou: ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print("\nGoodbye!")
-                break
-            if not text:
-                continue
-            try:
-                parsed = parse_input(text)
-            except ValueError as exc:
-                print(f"  {exc}")
-                continue
-            if isinstance(parsed, ReplCommand):
-                if parsed.name == "quit":
-                    break
-                if parsed.name == "help":
-                    print(HELP)
-                elif parsed.name == "skills":
-                    print(registry.catalog())
-                elif parsed.name == "prompts":
-                    print(PROMPTS.catalog())
-                elif parsed.name == "reload":
-                    # Both are edit-then-retry surfaces, so one command re-reads
-                    # both rather than making you remember which needs which.
-                    print(registry.reload())
-                    print(PROMPTS.reload())
-                elif parsed.name == "trace":
-                    tracing = not tracing
-                    print(f"  trace {'on' if tracing else 'off'}"
-                          f"{' -- re-run your last request to watch it' if tracing else ''}")
-                continue
-            message = (HumanMessage(content=parsed[1])
-                       if isinstance(parsed, tuple) else parsed)
-            attached = attached_image_count(message)
-            if attached:
-                print(f"  (attached {attached} image(s))")
-            log.start_turn(text, images=attached)
-            # Rebuilt per turn so /trace takes effect on the very next one.
-            config["callbacks"] = base_callbacks + ([live] if tracing else [])
-            try:
-                await _run_turn(graph, {"messages": [message]}, config,
-                                tracing, log)
-            except Exception as exc:  # keep the REPL alive on any turn failure
-                print(f"\nAI: that turn failed ({type(exc).__name__}: {exc}).")
+
+        await _repl(graph, registry, log, log.callbacks(), tracing)
 
 
 def main() -> None:

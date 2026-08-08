@@ -59,6 +59,11 @@ def _read_dir(path: str | None) -> dict[str, str]:
     return texts
 
 
+def _read_all() -> dict[str, str]:
+    """Built-in prompts with any override directory laid over the top."""
+    return {**_read_dir(BUILTIN_DIR), **_read_dir(override_dir())}
+
+
 def _problems(texts: dict[str, str], where: str) -> list[str]:
     """Why *texts* is unusable: a required prompt missing or blank."""
     out = []
@@ -79,7 +84,7 @@ class PromptLibrary:
     @classmethod
     def load(cls) -> PromptLibrary:
         """Read the built-ins, overlay any override dir, and validate."""
-        texts = {**_read_dir(BUILTIN_DIR), **_read_dir(override_dir())}
+        texts = _read_all()
         problems = _problems(texts, BUILTIN_DIR)
         if problems:
             raise ValueError("cannot load prompts: " + "; ".join(problems))
@@ -103,7 +108,7 @@ class PromptLibrary:
         edit: the agents hold this object, not the strings it returned.
         """
         try:
-            texts = {**_read_dir(BUILTIN_DIR), **_read_dir(override_dir())}
+            texts = _read_all()
         except OSError as exc:
             return f"prompt reload failed (keeping current): {exc}"
         problems = _problems(texts, BUILTIN_DIR)

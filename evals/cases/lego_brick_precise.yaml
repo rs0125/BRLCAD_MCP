@@ -2,7 +2,7 @@
 # 31.8 x 15.8 x 9.6 body, 8 studs of 4.8 dia x 1.8 tall at 8 mm pitch, 3.9 from
 # the edges.  Tests counting EIGHT additive features and placing them on a grid.
 id: lego_brick_precise
-image: ~/Downloads/test_brlcad_images/lego2.jpg
+image: lego2.jpg
 prompt: >-
   Model the Lego brick in this engineering drawing, named ev_lego_brick, using
   the precise dimensions printed on it. Model the outer body as one solid block

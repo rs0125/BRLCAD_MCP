@@ -2,7 +2,7 @@
 # x 1.7 mm tall at 8 mm spacing.  Unlike the other cases the features here are
 # ADDITIVE (studs standing proud), not cavities.
 id: lego_plate_drawing
-image: ~/Downloads/test_brlcad_images/lego.jpg
+image: lego.jpg
 prompt: >-
   The attached drawing dimensions two Lego pieces. Model ONLY the pink 1x2 plate,
   named ev_lego_plate, using the dimensions printed for it. Place the plate body

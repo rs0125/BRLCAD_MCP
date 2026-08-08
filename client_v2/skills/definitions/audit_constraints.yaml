@@ -12,17 +12,26 @@ io:
   outputs:
     - {name: approved, type: bool}
 
+dependencies:
+  - declare_assumption
+
 steps:
   - {check: "do the stated dimensions add up (features fit inside the material)?"}
   - {check: "is any feature larger than the part, or outside it?"}
   - {check: "is any required dimension still missing?"}
   - {present: "show the numbered constraints and assumptions to the user and ask them to confirm or correct"}
+  - {call: declare_assumption, for: "each value the reference did not settle"}
 
 cautions:
   - >-
     A feature that cannot fit (a 12 mm hole in a 10 mm plate, a pocket deeper
     than the material) is a contradiction in the reading of the drawing -- resolve
     it with the user rather than silently clamping it.
+  - >-
+    Record each unsettled value with declare_assumption, giving the VALUES:
+    chose the reading taken, over the one rejected. A decision that exists only
+    in the conversation is gone by the time anyone reads the model, and is then
+    indistinguishable from a misread.
 
 success_criteria:
   - "no contradictions remain, and the user has approved the numbers"

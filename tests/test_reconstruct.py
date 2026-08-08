@@ -371,3 +371,76 @@ def test_report_says_when_the_size_guard_did_not_run():
         Part(name="b", shape="box", size=[1, 1, 1])])
     assert "expect_bbox was not declared" not in RC._report(
         declared, None, [], "Built")
+
+
+# --- the saved spec has to be readable back -------------------------------
+
+def test_hole_intent_can_be_corrected_without_respecifying():
+    # `hole` is the through/pocket assertion the verifier leans on, so a wrong
+    # annotation had to be fixable through edit_build rather than forcing a full
+    # re-spec (which the prompt forbids and the collision guard resists).
+    parts = [{"name": "bore", "shape": "cylinder", "op": "subtract",
+              "center": [0, 0, 0], "height": [0, 0, 10], "radius": 2,
+              "hole": "through"}]
+    new, errors = RC._apply_edits(parts, [
+        {"action": "update", "name": "bore", "hole": "pocket"}])
+    assert errors == []
+    assert new[0]["hole"] == "pocket"
+    assert new[0]["radius"] == 2            # nothing else disturbed
+
+
+def test_an_edit_action_never_clobbers_a_parts_boolean_role():
+    parts = [{"name": "b", "shape": "box", "op": "add",
+              "center": [0, 0, 0], "size": [1, 1, 1]}]
+    new, errors = RC._apply_edits(parts, [
+        {"action": "move", "name": "b", "delta": [1, 0, 0]}])
+    assert errors == [] and new[0]["op"] == "add"
+    assert new[0]["center"] == [1, 0, 0]
+
+
+def test_list_builds_can_return_the_current_spec(tmp_path, monkeypatch):
+    """The spec on disk is the source of truth, and nothing could read it.
+
+    edit_build applies ops to the saved spec, but the build report gives only part
+    NAMES -- not their coordinates.  Once the spec left the agent's context (the
+    worker summarises at 60k tokens) a revision could only guess or re-specify the
+    whole model.
+    """
+    monkeypatch.setattr(RC, "_specs_root", lambda: str(tmp_path))
+    spec = {"name": "plate", "parts": [
+        {"name": "body", "shape": "box", "op": "add",
+         "center": [0, 0, 0], "size": [50, 20, 5]}]}
+    RC._save_spec("plate", spec)
+
+    listing = RC.list_builds(name="plate", show_spec=False)
+    assert "v001: 1 part(s)" in listing
+    assert "50" not in listing                    # counts only, by default
+
+    full = RC.list_builds(name="plate", show_spec=True)
+    assert '"size": [' in full and "50" in full    # the real values
+    assert "edit_build" in full                    # points at the edit path
+
+
+def test_reading_back_a_missing_build_says_so(tmp_path, monkeypatch):
+    monkeypatch.setattr(RC, "_specs_root", lambda: str(tmp_path))
+    assert "No saved builds" in RC.list_builds(name="ghost", show_spec=True)
+
+
+def test_a_mislabelled_through_hole_is_offered_pocket_before_lengthening():
+    """Message ORDER matters, not just its content.
+
+    With the geometry advice leading and "(or declare hole 'pocket')" trailing,
+    models twice lengthened the cutter instead -- punching through a face meant to
+    stay solid, and costing a build+verify cycle to notice and revert.  A cutter
+    contained on every axis is far more often a mislabelled blind recess.
+    """
+    spec = BuildSpec(name="brick", parts=[
+        Part(name="body", shape="box", center=[0, 0, 5], size=[20, 20, 10]),
+        Part(name="bore", shape="cylinder", op="subtract", center=[0, 0, 0],
+             height=[0, 0, 6], radius=2, hole="through"),
+    ])
+    errors = RC._hole_intent_errors(spec)
+    assert len(errors) == 1
+    msg = errors[0]
+    assert "pocket" in msg and "enlarge it" in msg
+    assert msg.index("'pocket'") < msg.index("enlarge it"), msg

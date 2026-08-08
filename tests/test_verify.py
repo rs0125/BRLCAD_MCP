@@ -309,3 +309,52 @@ def test_a_verify_run_tidies_up_after_itself():
 
     V._verify(spec, prober)
     assert any(c.startswith("kill ") and "query_ray" in c for c in calls)
+
+
+def test_verify_by_name_reads_the_stored_spec(monkeypatch, tmp_path):
+    """The point of the name path: the spec never crosses the wire again.
+
+    The worker used to re-serialise the whole parts list to ask this question --
+    ~1,300 output tokens per call for a 28-part model, and the rays are derived
+    from the ARGUMENT, so a mistyped copy would have verified the wrong target.
+    """
+    from brlcad_mcp.server.tools import reconstruct as RC
+    monkeypatch.setattr(RC, "_specs_root", lambda: str(tmp_path))
+    spec = _plate_spec()
+    RC._save_spec(spec.name, spec.model_dump())
+    monkeypatch.setattr(V, "send_command", _prober_for(spec))
+    out = V.verify_model_dimensions(name=spec.name)
+    assert "PASS" in out and "plate.r" in out
+
+
+def test_the_stored_spec_round_trip_keeps_expect_bbox(monkeypatch, tmp_path):
+    """A silently-dropped field would weaken the check rather than fail it."""
+    from brlcad_mcp.server.tools import reconstruct as RC
+    monkeypatch.setattr(RC, "_specs_root", lambda: str(tmp_path))
+    spec = _plate_spec()
+    spec.expect_bbox = [40.0, 40.0, 6.0]
+    RC._save_spec(spec.name, spec.model_dump())
+    reloaded = BuildSpec.model_validate(RC._latest_spec(spec.name))
+    assert reloaded.expect_bbox == [40.0, 40.0, 6.0]
+    # ...and the bbox check still uses it, rather than falling back to extents.
+    monkeypatch.setattr(V, "send_command", _prober_for(spec))
+    assert "PASS" in V.verify_model_dimensions(name=spec.name)
+
+
+def test_name_and_spec_together_are_refused_rather_than_ranked():
+    spec = _plate_spec()
+    out = V.verify_model_dimensions(spec=spec.model_dump(), name="plate")
+    assert out.startswith("Error:") and "not both" in out
+
+
+def test_neither_name_nor_spec_says_which_to_use():
+    out = V.verify_model_dimensions()
+    assert out.startswith("Error:") and "'name'" in out and "'spec'" in out
+
+
+def test_an_unknown_build_name_points_at_list_builds(monkeypatch, tmp_path):
+    from brlcad_mcp.server.tools import reconstruct as RC
+    monkeypatch.setattr(RC, "_specs_root", lambda: str(tmp_path))
+    out = V.verify_model_dimensions(name="never_built")
+    assert "no saved build named 'never_built'" in out
+    assert "list_builds" in out

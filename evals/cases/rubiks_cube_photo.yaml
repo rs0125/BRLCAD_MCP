@@ -2,7 +2,7 @@
 # (a standard 3x3 cube is 57 mm).  This is the BOX-subtract case: six slots, two
 # per axis, which the old cylinder-only cavity check could not verify at all.
 id: rubiks_cube_photo
-image: ~/Downloads/test_brlcad_images/rubic.jpg
+image: rubic.jpg
 prompt: >-
   Model the Rubik's cube in this image as a simplified solid, named
   ev_rubiks_cube. Use a 57 mm cube centred on the origin, and cut the 3x3 grid

@@ -104,6 +104,14 @@ class RenderConfig:
             "BRLCAD_BACKUP_DIR", os.path.expanduser("~/brlcad_backups")
         )
     )
+    # Saved build specs -- the source of truth `edit_build` applies ops to and
+    # `verify_model_dimensions(name=...)` reads back.  Empty means "derive from
+    # output_dir", which is the historical layout and is kept so an existing
+    # store is not orphaned; set it to keep specs out of the render folder, which
+    # is otherwise a cache someone may reasonably delete.
+    spec_dir: str = field(
+        default_factory=lambda: os.getenv("BRLCAD_SPEC_DIR", "")
+    )
 
 
 @dataclass(frozen=True)

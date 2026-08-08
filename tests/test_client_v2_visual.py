@@ -205,3 +205,34 @@ async def test_a_persistent_visual_mismatch_terminates_instead_of_recursing(
 
     assert result["visual"]["matched"] is False      # the opinion is reported
     assert result["visual_rounds"] == MAX_VISUAL_ROUNDS
+
+
+def test_the_latest_render_set_is_judged_not_the_first(tmp_path):
+    """A corrective edit_build leaves two render dirs; grading the older one
+    reported a mismatch against geometry the edit had already fixed."""
+    old, new = tmp_path / "old", tmp_path / "new"
+    old.mkdir(), new.mkdir()
+    stale = [old / "iso.png", old / "top.png"]
+    fresh = [new / "iso.png", new / "top.png"]
+    for p in stale + fresh:
+        p.write_bytes(b"x")
+    state = {"messages": [
+        ToolMessage(content=f"Built region. renders:\n{stale[0]}\n{stale[1]}",
+                    name="build_from_spec", tool_call_id="1"),
+        ToolMessage(content=f"Edited region. renders:\n{fresh[0]}\n{fresh[1]}",
+                    name="edit_build", tool_call_id="2"),
+    ]}
+    assert find_render_paths(state) == [str(fresh[0]), str(fresh[1])]
+
+
+def test_render_paths_fall_back_to_an_earlier_message_when_the_last_has_none(tmp_path):
+    """A trailing non-render tool result must not blank the comparison."""
+    png = tmp_path / "iso.png"
+    png.write_bytes(b"x")
+    state = {"messages": [
+        ToolMessage(content=f"renders: {png}", name="build_from_spec",
+                    tool_call_id="1"),
+        ToolMessage(content="Verification: PASS", name="verify_model_dimensions",
+                    tool_call_id="2"),
+    ]}
+    assert find_render_paths(state) == [str(png)]

@@ -28,7 +28,9 @@ from brlcad_mcp.server.app import mcp
 from brlcad_mcp.server.tools.helpers import (
     destructive_targets,
     expand_targets,
+    has_glob,
     is_error_response,
+    is_ray_artifact,
     ls_names,
     parse_response,
     removes_objects,
@@ -55,16 +57,6 @@ def _backups_root() -> str:
 def _legacy_backups_root() -> str:
     """The previous location, still read so old restore points remain usable."""
     return os.path.join(settings.render.output_dir, "backups")
-
-
-def _parse_ls_names(ls_output: str) -> set[str]:
-    """Object names from an ``ls`` payload, stripped of MGED decorations.
-
-    Delegates to the shared :func:`ls_names`, which also strips the ``/R``
-    region marker -- without that, a destructive command naming a REGION never
-    matched the live listing and the snapshot was silently skipped.
-    """
-    return ls_names(ls_output)
 
 
 def _sidecar_path(g_path: str) -> str:
@@ -126,7 +118,7 @@ def live_targets(command: str) -> list[str]:
         candidates = destructive_targets(command)
         if not candidates:
             return []
-        live = _parse_ls_names(parse_response(send_command("ls")))
+        live = ls_names(parse_response(send_command("ls")))
         return expand_targets(candidates, live)
     except (ConnectionError, TimeoutError, OSError) as exc:
         logger.warning("could not resolve destructive targets: %s", exc)
@@ -138,7 +130,7 @@ def survivors(objects: list[str]) -> list[str]:
     if not objects:
         return []
     try:
-        live = _parse_ls_names(parse_response(send_command("ls")))
+        live = ls_names(parse_response(send_command("ls")))
     except (ConnectionError, TimeoutError, OSError):
         return []
     return [o for o in objects if o in live]
@@ -152,7 +144,11 @@ def maybe_snapshot(command: str) -> str | None:
     Never raises -- a snapshot failure must not block the user's command.
     """
     try:
-        objects = live_targets(command)
+        # Ray leftovers are excluded: they hold nothing recoverable, `keep` on one
+        # exports a broken record, and a turn spent trying to delete an
+        # undeletable artifact otherwise leaves a restore point behind per
+        # attempt (it made three in one turn).
+        objects = [o for o in live_targets(command) if not is_ray_artifact(o)]
         if not objects:
             return None  # nothing to lose (fresh create / already-gone names)
 
@@ -174,23 +170,44 @@ def maybe_snapshot(command: str) -> str | None:
         return None
 
 
-def describe_effect(objects: list[str], left: list[str]) -> str:
+def describe_effect(objects: list[str], left: list[str],
+                    command: str = "") -> str:
     """Note describing what a destructive command actually removed (pure).
 
-    Empty when there was nothing to remove or everything went as asked.  MGED
-    can return SUCCESS for a command that changed nothing -- `kill *` did exactly
+    Empty when there was nothing to remove or everything went as asked.  MGED can
+    return SUCCESS for a command that changed nothing -- `kill *` did exactly
     that -- so "no output" is not evidence of an effect.
+
+    The ADVICE has to match the cause, or the note makes things worse.  The first
+    version always suggested "try naming objects explicitly", which is nonsense
+    when the command already did: faced with an undeletable `query_rayffff` the
+    agent burned ten tool calls re-trying kill, killall, summary, get and put,
+    because our own message implied a retry would help.  A note that sends the
+    reader somewhere useless is worse than no note.
     """
     if not objects or not left:
         return ""
-    if len(left) == len(objects):
-        return (f"\n(WARNING: this command reported success but removed NOTHING "
-                f"-- all {len(objects)} named object(s) are still present. MGED "
-                f"may not expand wildcards here; try naming objects explicitly "
-                f"and confirm with ls.)")
-    return (f"\n(NOTE: {len(objects) - len(left)} of {len(objects)} object(s) "
-            f"were removed; still present: {', '.join(left[:8])}"
-            f"{' ...' if len(left) > 8 else ''}.)")
+    partial = len(left) < len(objects)
+    prefix = (f"\n(NOTE: {len(objects) - len(left)} of {len(objects)} object(s) "
+              f"were removed, but "
+              if partial else
+              f"\n(WARNING: this command reported success but removed NOTHING -- "
+              f"all {len(objects)} named object(s) are still present: ")
+    shown = ", ".join(left[:8]) + (" ..." if len(left) > 8 else "")
+
+    if all(is_ray_artifact(name) for name in left):
+        return (f"{prefix}{shown}. These are nirt ray leftovers, not model "
+                f"geometry: they cannot be read or deleted (kill and killall both "
+                f"report success and leave them), and they are stale directory "
+                f"entries rather than real objects. Treat the database as empty of "
+                f"geometry and DO NOT keep trying to remove them.)")
+    if has_glob(command):
+        return (f"{prefix}{shown}. This MGED build does not appear to expand "
+                f"wildcards for this command -- name the objects explicitly and "
+                f"confirm with ls.)")
+    return (f"{prefix}{shown}. They were named explicitly, so retrying the same "
+            f"command will not help: the entries cannot be removed this way and "
+            f"may be stale or corrupt. Report this instead of retrying.)")
 
 
 def destructive_effect_note(command: str, targets: list[str]) -> str:
@@ -200,7 +217,7 @@ def destructive_effect_note(command: str, targets: list[str]) -> str:
     """
     if not removes_objects(command):
         return ""
-    return describe_effect(targets, survivors(targets))
+    return describe_effect(targets, survivors(targets), command)
 
 
 # ---------------------------------------------------------------------------
