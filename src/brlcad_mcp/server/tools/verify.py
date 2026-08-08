@@ -85,6 +85,25 @@ def _part_extent(part: Part):
         lo = [min(base[i], tip[i]) - pad[i] for i in range(3)]
         hi = [max(base[i], tip[i]) + pad[i] for i in range(3)]
         return (*lo, *hi)
+    if part.shape == "wedge":
+        # The frustum's footprint is the WIDER of its two faces on each axis:
+        # taking only ``size`` would under-report a wedge that flares outward.
+        sx, sy, sz = part.size  # type: ignore[misc]
+        tx, ty = part.top_size if part.top_size else (sx, sy)
+        hx, hy = max(sx, tx) / 2, max(sy, ty) / 2
+        return (cx - hx, cy - hy, cz - sz / 2, cx + hx, cy + hy, cz + sz / 2)
+    if part.shape == "cone":
+        hxv, hyv, hzv = part.height  # type: ignore[misc]
+        r0 = part.radius or 0.0
+        r1 = part.top_radius if part.top_radius is not None else r0
+        r = max(r0, r1)                  # widest end bounds the whole frustum
+        base, tip = (cx, cy, cz), (cx + hxv, cy + hyv, cz + hzv)
+        mag = math.sqrt(hxv * hxv + hyv * hyv + hzv * hzv) or 1.0
+        axis = (hxv / mag, hyv / mag, hzv / mag)
+        pad = [r * math.sqrt(max(0.0, 1.0 - u * u)) for u in axis]
+        lo = [min(base[i], tip[i]) - pad[i] for i in range(3)]
+        hi = [max(base[i], tip[i]) + pad[i] for i in range(3)]
+        return (*lo, *hi)
     r = part.radius or 0.0  # sphere
     return (cx - r, cy - r, cz - r, cx + r, cy + r, cz + r)
 

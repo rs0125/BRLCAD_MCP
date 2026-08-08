@@ -119,17 +119,156 @@ def _cylinder_intervals(part: Part, origin, direction) -> list[Interval]:
     return [(lo, hi)] if hi > lo else []
 
 
+def _wedge_intervals(part: Part, origin, direction) -> list[Interval]:
+    """Rectangular frustum: a box whose top face has its own footprint.
+
+    Convex, so it is the intersection of six half-spaces and the same clip loop
+    as the box works -- only the four side planes are tilted.  Written as a
+    frustum rather than a raw eight-vertex ``arb8`` because the shapes the
+    corpus needs (a 48 degree tapered flank, a triangular gusset, a chamfer) are
+    all this, and a caller gets a taper right far more often than it gets eight
+    ordered vertices right.  ``top_size`` of [x, 0] degenerates to a triangular
+    prism, which is the gusset case.
+    """
+    sx, sy, sz = part.size  # type: ignore[misc]
+    tx, ty = part.top_size if part.top_size else (sx, sy)
+    cx, cy, cz = part.center
+    z0, z1 = cz - sz / 2, cz + sz / 2
+    if sz <= _EPS:
+        return []
+
+    t_lo, t_hi = -math.inf, math.inf
+    # Bottom and top caps first: the plain slab test along Z.
+    if abs(direction[2]) < _EPS:
+        if origin[2] < z0 or origin[2] > z1:
+            return []
+    else:
+        a = (z0 - origin[2]) / direction[2]
+        b = (z1 - origin[2]) / direction[2]
+        t_lo, t_hi = max(t_lo, min(a, b)), min(t_hi, max(a, b))
+
+    # Each side plane interpolates its half-width with height, so the constraint
+    # |p_i - c_i| <= half(z) is linear in t and stays a half-space.
+    for i, (base, top, centre) in enumerate(
+            ((sx / 2, tx / 2, cx), (sy / 2, ty / 2, cy))):
+        slope = (top - base) / sz              # half-width change per unit Z
+        # half(z) = base + slope * (z - z0); write p_i - centre = +/- half(z).
+        for sign in (1.0, -1.0):
+            # sign*(o_i + t*d_i - centre) - base - slope*(o_z + t*d_z - z0) <= 0
+            coef = sign * direction[i] - slope * direction[2]
+            const = (sign * (origin[i] - centre) - base
+                     - slope * (origin[2] - z0))
+            if abs(coef) < _EPS:
+                if const > 0:
+                    return []
+                continue
+            t = -const / coef
+            if coef > 0:
+                t_hi = min(t_hi, t)
+            else:
+                t_lo = max(t_lo, t)
+    return [(t_lo, t_hi)] if t_hi > t_lo else []
+
+
+def _cone_intervals(part: Part, origin, direction) -> list[Interval]:
+    """Truncated cone (``tgc``): radius varies linearly from base to top.
+
+    The same split into axial and perpendicular components as the cylinder; the
+    only difference is that the radius being solved against is a function of how
+    far along the axis you are, which keeps the side test quadratic.
+    """
+    r0 = part.radius or 0.0
+    r1 = part.top_radius if part.top_radius is not None else r0
+    height = part.height or [0.0, 0.0, 0.0]
+    length = math.sqrt(_dot(height, height))
+    if length < _EPS or (r0 <= 0 and r1 <= 0):
+        return []
+    axis = _norm(height)
+    w = _sub(origin, part.center)
+    w_par, d_par = _dot(w, axis), _dot(direction, axis)
+    w_perp = _sub(w, _scale(axis, w_par))
+    d_perp = _sub(direction, _scale(axis, d_par))
+
+    # radius(t) = r0 + k * (w_par + t*d_par); solve |perp|^2 = radius^2.
+    k = (r1 - r0) / length
+    a = _dot(d_perp, d_perp) - (k * d_par) ** 2
+    rad0 = r0 + k * w_par
+    b = 2.0 * (_dot(w_perp, d_perp) - k * d_par * rad0)
+    c = _dot(w_perp, w_perp) - rad0 * rad0
+    # Solve a*t^2 + b*t + c <= 0.  The sign of *a* decides the SHAPE of the
+    # solution set, and getting that wrong is not a rounding error: when the ray
+    # leans inside the cone's own half-angle (|d_perp| < |k*d_par|, which every
+    # axis-parallel ray does) *a* goes negative and the set becomes the OUTSIDE
+    # of the roots -- two half-lines, not one interval.  Treating it as one
+    # interval predicted zero material through a solid cone.
+    if abs(a) < _EPS:                       # linear: ray parallel to the flank
+        if abs(b) < _EPS:
+            side = [(-math.inf, math.inf)] if c <= 0 else []
+        elif b > 0:
+            side = [(-math.inf, -c / b)]
+        else:
+            side = [(-c / b, math.inf)]
+    else:
+        disc = b * b - 4 * a * c
+        if a > 0:
+            if disc <= 0:
+                return []
+            root = math.sqrt(disc)
+            lo, hi = sorted(((-b - root) / (2 * a), (-b + root) / (2 * a)))
+            side = [(lo, hi)]
+        elif disc <= 0:
+            # Opens downward and never rises above zero: satisfied everywhere.
+            side = [(-math.inf, math.inf)]
+        else:
+            root = math.sqrt(disc)
+            lo, hi = sorted(((-b - root) / (2 * a), (-b + root) / (2 * a)))
+            side = [(-math.inf, lo), (hi, math.inf)]
+
+    # Clip to the axial span 0..length.  This is also what excludes the MIRROR
+    # cone on the far side of the apex, which satisfies |perp| <= |radius| just
+    # as well but is no part of the solid.
+    if abs(d_par) < _EPS:
+        if w_par < 0.0 or w_par > length:
+            return []
+        caps: Interval = (-math.inf, math.inf)
+    else:
+        t1 = (0.0 - w_par) / d_par
+        t2 = (length - w_par) / d_par
+        caps = (min(t1, t2), max(t1, t2))
+
+    out = []
+    for s_lo, s_hi in side:
+        lo, hi = max(s_lo, caps[0]), min(s_hi, caps[1])
+        if hi > lo:
+            out.append((lo, hi))
+    return out
+
+
 _SHAPE_INTERVALS = {
     "box": _box_intervals,
     "cylinder": _cylinder_intervals,
     "sphere": _sphere_intervals,
+    "wedge": _wedge_intervals,
+    "cone": _cone_intervals,
 }
 
 
 def part_intervals(part: Part, origin, direction) -> list[Interval]:
-    """Parameter intervals where the ray is inside this primitive."""
+    """Parameter intervals where the ray is inside this primitive.
+
+    An unknown shape RAISES rather than returning nothing.  Returning [] reads
+    as "the ray crosses no material here", so a primitive we cannot intersect
+    would not make verification silent -- it would make it *wrong*, reporting
+    every ray through that part as measuring more material than expected.  A
+    shape reaching here unknown means the build-time whitelist and this table
+    have drifted apart, and that must be loud.
+    """
     fn = _SHAPE_INTERVALS.get(part.shape)
-    return fn(part, origin, direction) if fn else []
+    if fn is None:
+        raise ValueError(
+            f"no ray-intersection function for shape '{part.shape}'; "
+            f"verification cannot predict material for it")
+    return fn(part, origin, direction)
 
 
 # --- interval boolean algebra --------------------------------------------

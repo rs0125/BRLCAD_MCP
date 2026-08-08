@@ -7,9 +7,17 @@ views so the result can be compared against the reference.  Same spec in -> same
 geometry out, every time.  Re-running with the same names rebuilds cleanly
 (existing objects are removed first), which is what the adjust loop needs.
 
-Spec vocabulary (v1): box / cylinder / sphere primitives, unioned or subtracted
-into a single region, with an optional overall colour.  Rounded-profile bodies
-via sketch/extrude are a planned extension.
+Spec vocabulary: box / cylinder / sphere / wedge / cone primitives, unioned or
+subtracted into a single region, with an optional overall colour.
+
+The vocabulary is deliberately far smaller than BRL-CAD's 41 primitives, and the
+constraint is NOT what the engine can build -- it builds all of them, and
+``execute_command`` reaches any of them today.  It is what ``csg.py`` can
+intersect a ray with analytically, because that prediction is what verification
+compares against.  ``wedge`` (a rectangular frustum) and ``cone`` (a truncated
+cone) were added because nothing else here can make a sloped or tapered face;
+a torus was not, because its ray intersection is a quartic and fillets are
+already reachable as box minus cylinder.
 """
 
 from __future__ import annotations
@@ -33,7 +41,7 @@ from brlcad_mcp.server.tools.helpers import (
 )
 from brlcad_mcp.transport import send_command
 
-_SHAPES = ("box", "cylinder", "sphere")
+_SHAPES = ("box", "cylinder", "sphere", "wedge", "cone")
 _OPS = ("add", "subtract")
 _HOLE_KINDS = ("through", "pocket")
 # Check views are diagnostic images: flat lighting keeps features countable.
@@ -46,6 +54,11 @@ class Part(BaseModel):
     box:      size [x,y,z] and center [x,y,z]
     cylinder: center [x,y,z] (base), height [x,y,z] (axis vector), radius
     sphere:   center [x,y,z], radius
+    wedge:    center [x,y,z], size [x,y,z], top_size [x,y] -- a box whose top
+              face has its own footprint. The sloped-face primitive: tapered
+              flanks, gussets (top_size [x,0]), chamfers.
+    cone:     center [x,y,z] (base), height [x,y,z] (axis vector), radius
+              (base), top_radius. Tapered bosses, countersinks, turned profiles.
     """
 
     name: str
@@ -55,6 +68,12 @@ class Part(BaseModel):
     size: list[float] | None = None
     height: list[float] | None = None
     radius: float | None = None
+    # wedge: footprint of the TOP face, [x, y].  Absent means the top matches
+    # ``size``, i.e. the wedge degenerates to a plain box.
+    top_size: list[float] | None = None
+    # cone: radius at the far end of ``height``.  Absent means it equals
+    # ``radius``, i.e. the cone degenerates to a plain cylinder.
+    top_radius: float | None = None
     # Intent for a subtracted cylinder: "through" (a hole that exits the far
     # face) or "pocket" (a blind recess that deliberately stops inside).  A
     # verifier cannot infer this from geometry alone -- a cutter that stops
@@ -121,8 +140,36 @@ def _validate(spec: BuildSpec) -> list[str]:
                 errors.append(f"'{p.name}': cylinder needs a height vector")
             if not p.radius or p.radius <= 0:
                 errors.append(f"'{p.name}': cylinder needs a positive radius")
-        elif p.shape == "sphere" and (not p.radius or p.radius <= 0):
-            errors.append(f"'{p.name}': sphere needs a positive radius")
+        elif p.shape == "sphere":
+            if not p.radius or p.radius <= 0:
+                errors.append(f"'{p.name}': sphere needs a positive radius")
+        elif p.shape == "wedge":
+            if not p.size or len(p.size) != 3 or any(v <= 0 for v in p.size):
+                errors.append(f"'{p.name}': wedge needs positive size [x, y, z]")
+            if p.top_size is not None and (
+                    len(p.top_size) != 2 or any(v < 0 for v in p.top_size)):
+                errors.append(f"'{p.name}': wedge top_size must be [x, y], "
+                              f"each >= 0 (0 collapses that edge to a line, "
+                              f"which is how you get a triangular gusset)")
+            if p.top_size is not None and not any(p.top_size) and not any(
+                    v for v in (p.size or [])[:2]):
+                errors.append(f"'{p.name}': wedge has no width at either end")
+        elif p.shape == "cone":
+            if not p.height or len(p.height) != 3 or not any(p.height):
+                errors.append(f"'{p.name}': cone needs a height vector")
+            r0 = p.radius or 0.0
+            r1 = p.top_radius if p.top_radius is not None else r0
+            # BRL-CAD's `in ... trc` refuses a zero radius at either end, so a
+            # true apex is not available. Say so and ask for a small positive
+            # value rather than substituting one silently: a cone that is not
+            # the cone the caller described would verify against the wrong
+            # prediction, which is worse than a rejection.
+            if r0 <= 0 or r1 <= 0:
+                errors.append(
+                    f"'{p.name}': cone needs a positive radius at BOTH ends "
+                    f"(got base {r0:g}, top {r1:g}). A true point is not "
+                    f"representable -- use a small radius such as 0.1 for a "
+                    f"near-apex, or 'cylinder' if the ends are equal")
     errors.extend(_hole_intent_errors(spec))
     errors.extend(_bbox_intent_errors(spec))
     return errors
@@ -225,6 +272,25 @@ def _solid_name(region: str, part_name: str) -> str:
     return f"{region}_{part_name}.s"
 
 
+def _wedge_vertices(part: Part):
+    """The eight arb8 vertices of a rectangular frustum, bottom face first.
+
+    MGED wants the four bottom corners counter-clockwise then the four top ones
+    in the SAME order; getting that order wrong yields a self-intersecting solid
+    that still builds and then ray-traces as nonsense, so it is generated here
+    rather than asked of a caller.
+    """
+    sx, sy, sz = part.size  # type: ignore[misc]
+    tx, ty = part.top_size if part.top_size else (sx, sy)
+    cx, cy, cz = part.center
+    z0, z1 = cz - sz / 2, cz + sz / 2
+    out = []
+    for half_x, half_y, z in ((sx / 2, sy / 2, z0), (tx / 2, ty / 2, z1)):
+        out += [(cx - half_x, cy - half_y, z), (cx + half_x, cy - half_y, z),
+                (cx + half_x, cy + half_y, z), (cx - half_x, cy + half_y, z)]
+    return out
+
+
 def _solid_cmd(part: Part, region: str = "") -> str:
     """The MGED ``in`` command that creates this part's solid."""
     n = _solid_name(region, part.name) if region else f"{part.name}.s"
@@ -237,6 +303,17 @@ def _solid_cmd(part: Part, region: str = "") -> str:
     if part.shape == "cylinder":
         hx, hy, hz = part.height  # type: ignore[misc]
         return f"in {n} rcc {cx:g} {cy:g} {cz:g} {hx:g} {hy:g} {hz:g} {part.radius:g}"
+    if part.shape == "wedge":
+        return f"in {n} arb8 " + " ".join(
+            f"{v:g}" for pt in _wedge_vertices(part) for v in pt)
+    if part.shape == "cone":
+        hx, hy, hz = part.height  # type: ignore[misc]
+        r0 = part.radius or 0.0
+        r1 = part.top_radius if part.top_radius is not None else r0
+        # trc: base point, height vector, base radius, top radius -- the right
+        # circular case of tgc, which is all a frustum needs.
+        return (f"in {n} trc {cx:g} {cy:g} {cz:g} "
+                f"{hx:g} {hy:g} {hz:g} {r0:g} {r1:g}")
     return f"in {n} sph {cx:g} {cy:g} {cz:g} {part.radius:g}"  # sphere
 
 
@@ -534,8 +611,13 @@ def build_from_spec(
             '  ]\n'
             '}\n'
             "Shapes: box (size+center), cylinder (center=base, height vector, "
-            "radius), sphere (center, radius). op is 'add' or 'subtract'; the "
-            "first part must be 'add'. All units are mm."
+            "radius), sphere (center, radius), wedge (size+center plus "
+            "top_size [x,y] -- a box whose top face has its own footprint: "
+            "tapered flanks, chamfers, and gussets via top_size [x,0]), cone "
+            "(center=base, height vector, radius, top_radius -- tapered "
+            "bosses, countersinks, turned profiles; both radii must be > 0). "
+            "op is 'add' or 'subtract'; the first part must be 'add'. All "
+            "units are mm."
         ),
     ),
 ) -> str:

@@ -91,8 +91,17 @@ def test_ray_starting_inside_counts_only_the_material_ahead():
     assert math.isclose(expected_thickness(spec, (0.0, 0.0, 4.0), _DOWN), 4.0)
 
 
-def test_unknown_shape_yields_no_intervals():
-    assert part_intervals(Part(name="x", shape="torus"), (0, 0, 1), _DOWN) == []
+def test_unknown_shape_raises_rather_than_yielding_no_intervals():
+    """It used to return [], which reads as "the ray crosses no material here".
+
+    That does not make verification silent, it makes it WRONG: every ray through
+    the unknown part reports measuring more material than predicted. A shape
+    getting here means the build-time whitelist and the interval table have
+    drifted apart, and that has to be loud.
+    """
+    import pytest
+    with pytest.raises(ValueError, match="no ray-intersection function"):
+        part_intervals(Part(name="x", shape="torus"), (0, 0, 1), _DOWN)
 
 
 # --- interval algebra -----------------------------------------------------

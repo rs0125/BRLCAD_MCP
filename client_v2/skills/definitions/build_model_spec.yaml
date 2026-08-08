@@ -16,10 +16,13 @@ io:
         "views": [ "iso"|"iso2"|"front"|"back"|"side"|"side2"|"top"|"bottom" ]?,
         "expect_bbox": [Lx,Ly,Lz]? (the overall size you intend --
         the build is REJECTED if the parts do not produce it), "parts": [{"name": str, "shape":
-        "box"|"cylinder"|"sphere", "op": "add"|"subtract", "center": [x,y,z],
-        "size": [x,y,z] (box), "height": [x,y,z] (cylinder axis), "radius":
-        float (cylinder/sphere), "hole": "through"|"pocket" (subtract only --
-        say whether the cavity exits the far face or is a blind recess)}]}
+        "box"|"cylinder"|"sphere"|"wedge"|"cone", "op": "add"|"subtract",
+        "center": [x,y,z], "size": [x,y,z] (box/wedge), "top_size": [x,y]
+        (wedge -- the TOP face's footprint; [x,0] collapses to a triangular
+        gusset), "height": [x,y,z] (cylinder/cone axis), "radius": float
+        (cylinder/sphere/cone base), "top_radius": float (cone far end, must be
+        > 0), "hole": "through"|"pocket" (subtract only -- say whether the
+        cavity exits the far face or is a blind recess)}]}
       unit: mm
       required: true
   outputs:
