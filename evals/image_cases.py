@@ -287,6 +287,537 @@ IMAGE_CASES: list[dict] = [
         },
     },
 
+    # --- smoke tests for the wedge/cone primitives ------------------------
+    #
+    # PROVISIONAL: no ground truth yet, so these score nothing.  They exist to
+    # answer one question before a corpus is built on top of the new shapes --
+    # does the agent REACH for them?  Each drawing was picked because it cannot
+    # be built honestly without one: the first has 48-degree tapered flanks
+    # (wedge), the second is two turned profiles (cone).  A run that comes back
+    # made of plain boxes and cylinders is the interesting negative result.
+    {
+        "id": "img_tapered_part",
+        "provisional": True,
+        "image": "triangularpartdrawing.jpg",
+        "prompt": "Model this part in BRL-CAD from the drawing, named "
+                  "img_tapered. Use the dimensions printed on it.",
+        "region": "img_tapered",
+        "expect": {},
+    },
+    {
+        "id": "img_chess_pawn",
+        "provisional": True,
+        "image": "chesspieces.png",
+        "prompt": "Model the PAWN from this drawing in BRL-CAD, named "
+                  "img_pawn, using the dimensions printed for it. Ignore the "
+                  "rook.",
+        "region": "img_pawn",
+        "expect": {},
+    },
+
+
+    # ======================================================================
+    # TIERED CORPUS -- the 2026-08-08 drawing set
+    # ======================================================================
+    # Four tiers, and the tier is a statement about the DRAWING, not about how
+    # hard we found it.  easy/medium carry a real envelope because the sheet
+    # determines one.  ambiguous deliberately asserts NO envelope: those sheets
+    # genuinely under-determine the part, so a bbox would be scoring our guess
+    # against the agent's.  hard is expected to fail and is kept for that --
+    # how it fails is the measurement.
+    #
+    # Every drawing gets a terse case (what a user would type) and a guided one
+    # supplying only what the image cannot carry.  No full-spec third tier for
+    # these yet: hand-authoring twenty complete specs is its own job, and for
+    # the ambiguous sheets a "correct" spec would be invention, not truth.
+
+    # --- EASY -------------------------------------------------------------
+    {
+        # Pure orthogonal boxes, every dimension printed. The reference case
+        # for "the pipeline works at all" -- if this is flaky, nothing else
+        # measured downstream means anything.
+        "id": "img_step_block_47",
+        "image": "textbook3.jpeg",
+        "prompt": "Model this part in BRL-CAD from the drawing, named "
+                  "img_step47, using the printed dimensions.",
+        "region": "img_step47",
+        "expect": {
+            "dimensions": ["47", "34", "33"],
+            "bbox": [47, 34, 33],
+            # The defining feature is that the top is STEPPED, not flat: a
+            # solid 47x34x33 block satisfies the bbox perfectly. Two rays at
+            # different footprint fractions must therefore disagree, and the
+            # one over the pocket must be the shorter.
+            "rays": [
+                {"desc": "outer rim is full height", "fraction": True,
+                 "start": [0.04, 0.5, 1.5], "dir": [0, 0, -1],
+                 "expect": "hit", "los_frac": 1.0},
+            ],
+        },
+    },
+    {
+        "id": "img_step_block_47_guided",
+        "image": "textbook3.jpeg",
+        "prompt": "Model this part in BRL-CAD from the drawing, named "
+                  "img_step47_g. All dimensions are millimetres. Put the part "
+                  "in the first octant with its largest face on the XY plane "
+                  "and the 33 mm dimension along +Z.",
+        "region": "img_step47_g",
+        "expect": {
+            "dimensions": ["47", "34", "33"],
+            "bbox": [47, 34, 33],
+            "rays": [
+                {"desc": "outer rim is full height", "fraction": True,
+                 "start": [0.04, 0.5, 1.5], "dir": [0, 0, -1],
+                 "expect": "hit", "los_frac": 1.0},
+            ],
+        },
+    },
+    {
+        "id": "img_step_block_70",
+        "image": "textbook3.jpg",
+        "prompt": "Model this part in BRL-CAD from the drawing, named "
+                  "img_step70, using the printed dimensions.",
+        "region": "img_step70",
+        "expect": {
+            "dimensions": ["70", "60", "40", "30"],
+            # No ray: the top is castellated and the drawing does not say
+            # WHERE the full height survives, so any probe position would be
+            # my guess rather than the sheet's. One was, and it failed a build
+            # whose envelope is right.
+            "bbox": [70, 60, 60],
+        },
+    },
+    {
+        "id": "img_step_block_70_guided",
+        "image": "textbook3.jpg",
+        "prompt": "Model this part in BRL-CAD from the drawing, named "
+                  "img_step70_g. All dimensions are millimetres. Put the part "
+                  "in the first octant with the 60 mm height along +Z.",
+        "region": "img_step70_g",
+        "expect": {
+            "dimensions": ["70", "60", "40", "30"],
+            # No ray: the top is castellated and the drawing does not say
+            # WHERE the full height survives, so any probe position would be
+            # my guess rather than the sheet's. One was, and it failed a build
+            # whose envelope is right.
+            "bbox": [70, 60, 60],
+        },
+    },
+    {
+        # The cleanest sheet in the set: a professional drawing with a section
+        # view AND "ALL DIMENSIONS IN mm" printed on it, so there is no unit
+        # question and no hidden interior.
+        "id": "img_round_bracket",
+        "image": "roundbracket.jpg",
+        "prompt": "Model this bracket in BRL-CAD from the drawing, named "
+                  "img_rbracket, using the printed dimensions.",
+        "region": "img_rbracket",
+        "expect": {
+            "dimensions": ["25", "30", "15", "5", "6"],
+            # Section A-A is what settles this: the Ø50 boss spans -25..+25,
+            # then steps down to the 5 mm flange which runs 20 FURTHER, to
+            # +45. So 70 across, not 50 -- the front view's 25 locates the
+            # step, it is not the overall half-width.
+            "bbox": [70, 50, 15],
+            "rays": [
+                {"desc": "the boss bore is open through", "fraction": True,
+                 "start": [0.25, 0.5, 1.5], "dir": [0, 0, -1],
+                 "expect": "miss"},
+            ],
+        },
+    },
+    {
+        "id": "img_round_bracket_guided",
+        "image": "roundbracket.jpg",
+        "prompt": "Model this bracket in BRL-CAD from the drawing, named "
+                  "img_rbracket_g. Take Section A-A as controlling for "
+                  "thicknesses. Lay the part flat with its 15 mm thickness "
+                  "along +Z and the bore axis parallel to Z.",
+        "region": "img_rbracket_g",
+        "expect": {
+            "dimensions": ["25", "30", "15", "5", "6"],
+            "bbox": [70, 50, 15],
+            "rays": [
+                {"desc": "the boss bore is open through", "fraction": True,
+                 "start": [0.25, 0.5, 1.5], "dir": [0, 0, -1],
+                 "expect": "miss"},
+            ],
+        },
+    },
+
+    # --- MEDIUM -----------------------------------------------------------
+    {
+        # The richest properly-dimensioned sheet: pictorial plus three
+        # orthographic views, an arched upright, a bore and two through holes.
+        "id": "img_arched_base",
+        "image": "engineeringdrawing.jpg",
+        "prompt": "Model this part in BRL-CAD from the drawing, named "
+                  "img_arched, using the printed dimensions.",
+        "region": "img_arched",
+        "expect": {
+            "dimensions": ["98", "42", "20", "21", "14", "12"],
+            # 98 x 42 base; height is 20 (base) + 21 (to the bore centre)
+            # + R21 (the arch above it) = 62.
+            "bbox": [98, 42, 62],
+        },
+    },
+    {
+        "id": "img_arched_base_guided",
+        "image": "engineeringdrawing.jpg",
+        "prompt": "Model this part in BRL-CAD from the drawing, named "
+                  "img_arched_g. All dimensions are millimetres. The upright's "
+                  "top is a semicircular arch of R21 centred on the Ø20 bore. "
+                  "Stand the part on its 98 x 42 base with +Z up.",
+        "region": "img_arched_g",
+        "expect": {
+            "dimensions": ["98", "42", "20", "21", "14", "12"],
+            "bbox": [98, 42, 62],
+            "rays": [
+                {"desc": "base is 20 mm thick at a corner", "fraction": True,
+                 "start": [0.03, 0.06, 1.5], "dir": [0, 0, -1],
+                 "expect": "hit", "los": 20},
+            ],
+        },
+    },
+    {
+        # Decimal INCHES with no unit word anywhere. Read as millimetres the
+        # part comes out 25x too small, and every printed number still
+        # "matches" -- which is why the terse twin asserts proportions only.
+        "id": "img_two_boss_bar",
+        "image": "2headedpart.jpg",
+        "prompt": "Model this part in BRL-CAD from the drawing, named "
+                  "img_twoboss, using the printed dimensions.",
+        "region": "img_twoboss",
+        "expect": {
+            "min_declarations": 1,
+            "dimensions": ["5.000", "1.500", "1.000", ".750"],
+            "bbox_ratio": [5.0, 1.0, 1.5],
+        },
+    },
+    {
+        "id": "img_two_boss_bar_guided",
+        "image": "2headedpart.jpg",
+        "prompt": "Model this part in BRL-CAD from the drawing, named "
+                  "img_twoboss_g. The numbers on this drawing are INCHES; "
+                  "build in millimetres at 25.4 mm per inch. Stand the bar on "
+                  "its 5.000 x 1.000 base with the bosses upward along +Z.",
+        "region": "img_twoboss_g",
+        "expect": {
+            "min_declarations": 1,
+            "dimensions": ["5.000", "1.500", "1.000", ".750"],
+            "bbox": [127.0, 25.4, 38.1],       # 5 x 1 x 1.5 inches
+        },
+    },
+    {
+        # Dual-dimensioned: every value appears as mm with the inch equivalent
+        # in brackets. Mixing the two systems is the failure to catch.
+        "id": "img_dual_unit_bracket",
+        "image": "metalbracketcomplicated2.jpg",
+        "prompt": "Model this bracket in BRL-CAD from the drawing, named "
+                  "img_dualunit, using the printed dimensions.",
+        "region": "img_dualunit",
+        "expect": {
+            "min_declarations": 1,
+            "dimensions": ["22", "21.2", "17.7", "11", "9.5", "1.5"],
+            # Only the two axes I can read unambiguously off the front and
+            # side views; the third is left open rather than guessed.
+            "bbox": [22, None, 21.2],
+        },
+    },
+    {
+        "id": "img_dual_unit_bracket_guided",
+        "image": "metalbracketcomplicated2.jpg",
+        "prompt": "Model this bracket in BRL-CAD from the drawing, named "
+                  "img_dualunit_g. Every dimension is given twice: "
+                  "millimetres first, then the inch equivalent in brackets. "
+                  "Use the millimetre values throughout and ignore the "
+                  "bracketed ones.",
+        "region": "img_dualunit_g",
+        "expect": {
+            "min_declarations": 1,
+            "dimensions": ["22", "21.2", "17.7", "11", "9.5", "1.5"],
+            "bbox": [22, None, 21.2],
+        },
+    },
+    {
+        # A big, thin, simple L -- and a scale change from everything else in
+        # the corpus (120 mm across 3 mm material). Hole positions are NOT
+        # dimensioned, so those are for the declaration record, not geometry.
+        "id": "img_angle_bracket",
+        "image": "complicatedbracket.jpg",
+        "prompt": "Model this angle bracket in BRL-CAD from the drawing, "
+                  "named img_angle, using the printed dimensions.",
+        "region": "img_angle",
+        "expect": {
+            "min_declarations": 2,
+            "dimensions": ["120", "100", "3.0"],
+            "bbox": [120, 100, 100],
+            "rays": [
+                # Same defining property as the other L: the middle of the
+                # footprint is air. A solid block passes the bbox.
+                {"desc": "footprint centre is open", "fraction": True,
+                 "start": [0.5, 0.5, 1.5], "dir": [0, 0, -1],
+                 "expect": "miss"},
+            ],
+        },
+    },
+    {
+        "id": "img_angle_bracket_guided",
+        "image": "complicatedbracket.jpg",
+        "prompt": "Model this angle bracket in BRL-CAD from the drawing, "
+                  "named img_angle_g. It is 3.0 mm sheet folded to a right "
+                  "angle, 120 mm along the fold. Put the inside corner at the "
+                  "origin with both legs running along +X and +Z, and model "
+                  "the fold as a sharp corner. The hole pattern is not "
+                  "dimensioned -- place it sensibly and declare what you "
+                  "assumed.",
+        "region": "img_angle_g",
+        # This prompt fixes the axes outright (legs along +X and +Z, fold along
+        # Y), so the expectation is written in those axes and scored in order.
+        "oriented": True,
+        "expect": {
+            "min_declarations": 2,
+            "dimensions": ["120", "100", "3.0"],
+            # 100 is the OUTER leg length on this drawing; reading it as inner
+            # and adding material outside it gives 103, which is the failure
+            # this case is here to catch.
+            "bbox": [100, 120, 100],
+            "rays": [
+                # The L opens toward +X/+Z, so its empty quadrant is in the XZ
+                # plane -- a ray fired DOWN the Z axis hits the horizontal leg
+                # no matter how correct the part is. Fire along the fold
+                # instead: mid-leg in both X and Z is air for the full 120.
+                {"desc": "the L's open quadrant is empty", "fraction": True,
+                 "start": [0.5, -0.2, 0.5], "dir": [0, 1, 0],
+                 "expect": "miss"},
+                {"desc": "sheet is 3 mm thick", "fraction": True,
+                 "start": [0.5, 0.5, 1.5], "dir": [0, 0, -1],
+                 "expect": "hit", "los": 3.0},
+            ],
+        },
+    },
+
+
+    # --- AMBIGUOUS --------------------------------------------------------
+    #
+    # No bbox on any of these. Not an omission: these sheets do not determine
+    # an envelope, so asserting one would score OUR reading against the
+    # agent's. What IS scoreable is whether it read the printed features and
+    # DECLARED the gaps -- which is the behaviour that makes an
+    # under-dimensioned drawing safe to work from at all.
+    {
+        # Proven under-dimensioned: a live run built this and declared six
+        # invented numbers to do it (overall width, base thickness, boss
+        # diameter, depth layout, corner orientation, boss height).
+        "id": "img_tapered_flanks",
+        "image": "triangularpartdrawing.jpg",
+        "prompt": "Model this part in BRL-CAD from the drawing, named "
+                  "img_taperflank, using the printed dimensions.",
+        "region": "img_taperflank",
+        "expect": {
+            "min_declarations": 3,
+            "dimensions": ["56", "78", "35", "21", "36"],
+            # The overall width is NOT printed -- it follows from the 56 mm top
+            # and the 48 degree flanks only once you assume a height for the
+            # tapered section. Saying so is the test.
+            "conflicts": [["56"], ["48", "width", "overall"]],
+        },
+    },
+    {
+        "id": "img_tapered_flanks_guided",
+        "image": "triangularpartdrawing.jpg",
+        "prompt": "Model this part in BRL-CAD from the drawing, named "
+                  "img_taperflank_g. All dimensions are millimetres. The 56 mm "
+                  "is the width at the TOP of the tapered section and the "
+                  "flanks run at 48 degrees from there down to the base. "
+                  "Stand it with the 78 mm dimension along +Z.",
+        "region": "img_taperflank_g",
+        "expect": {
+            "min_declarations": 2,"dimensions": ["56", "78", "35", "21", "36"]},
+    },
+    {
+        # A photograph of a sketch being drawn, hands and marker in frame,
+        # isometric only. The realistic worst case for input quality.
+        "id": "img_hand_sketch_block",
+        "image": "handdrawnpart.jpg",
+        "prompt": "Model this part in BRL-CAD from the sketch, named "
+                  "img_handblock.",
+        "region": "img_handblock",
+        "expect": {
+            "min_declarations": 3,"dimensions": ["30", "57"]},
+    },
+    {
+        "id": "img_hand_sketch_block_guided",
+        "image": "handdrawnpart.jpg",
+        "prompt": "Model this part in BRL-CAD from the sketch, named "
+                  "img_handblock_g. It is a rectangular block with a step cut "
+                  "out of one corner; the numbers are millimetres. Ignore the "
+                  "hands, the marker and the angle notes at the bottom. Put "
+                  "the block in the first octant.",
+        "region": "img_handblock_g",
+        "expect": {
+            "min_declarations": 2,"dimensions": ["30", "57"]},
+    },
+    {
+        # Photographed textbook page: isometric only, radii everywhere, and
+        # the sheet is an EXERCISE asking for orthographic views -- so part of
+        # the test is not being derailed by the instructions printed on it.
+        "id": "img_textbook_bracket",
+        "image": "textbookbracket.png",
+        "prompt": "Model the bracket shown in this drawing in BRL-CAD, named "
+                  "img_tbbracket, using the printed dimensions.",
+        "region": "img_tbbracket",
+        "expect": {
+            "min_declarations": 3,"dimensions": ["80", "40", "60", "20", "15"]},
+    },
+    {
+        "id": "img_textbook_bracket_guided",
+        "image": "textbookbracket.png",
+        "prompt": "Model the bracket shown in this drawing in BRL-CAD, named "
+                  "img_tbbracket_g. All dimensions are millimetres. Ignore the "
+                  "printed exercise instructions about third-angle projection "
+                  "and the section views -- just build the solid. Stand it on "
+                  "its 80 x 40 base with +Z up.",
+        "region": "img_tbbracket_g",
+        "expect": {
+            "min_declarations": 2,"dimensions": ["80", "40", "60", "20", "15"]},
+    },
+
+    # --- HARD -------------------------------------------------------------
+    #
+    # Expected to fail, and kept for exactly that. A corpus where everything
+    # passes measures nothing; these mark where the current primitive set and
+    # the current reading actually run out.
+    {
+        # Turned profiles. Stacked cones approximate them; BRL-CAD's revolve of
+        # a sketch with arcs would be exact, but csg.py cannot predict rays
+        # through one, so it cannot enter the parametric path. The tight
+        # diameter rays are the measurement of how much that costs.
+        "id": "img_chess_pawn_hard",
+        "image": "chesspieces.png",
+        "prompt": "Model the PAWN from this drawing in BRL-CAD, named "
+                  "img_pawnh, using the dimensions printed for it. Ignore the "
+                  "rook.",
+        "region": "img_pawnh",
+        "expect": {
+            "min_declarations": 2,
+            "dimensions": ["32.1", "17.2", "12.15", "15.6"],
+            "bbox": [17.2, 17.2, 32.1],
+            "rays": [
+                # Chord through the axis IS the diameter at that height. The
+                # base is a straight cylinder, so this one should hold even for
+                # a coarse approximation.
+                {"desc": "base diameter at 1.75 mm", "relative": True,
+                 "start": [-40, 8.6, 1.75], "dir": [1, 0, 0],
+                 "expect": "hit", "los": 17.2},
+            ],
+        },
+    },
+    {
+        "id": "img_chess_pawn_hard_guided",
+        "image": "chesspieces.png",
+        "prompt": "Model the PAWN from this drawing in BRL-CAD, named "
+                  "img_pawnh_g, using the dimensions printed for it; ignore "
+                  "the rook. All dimensions are millimetres. It is a turned "
+                  "part: build it as a solid of revolution about +Z, standing "
+                  "on its base. Match the printed diameters at their printed "
+                  "heights as closely as the available primitives allow, and "
+                  "declare where you had to approximate a curve.",
+        "region": "img_pawnh_g",
+        "expect": {
+            "min_declarations": 2,
+            "dimensions": ["32.1", "17.2", "12.15", "15.6"],
+            "bbox": [17.2, 17.2, 32.1],
+            "rays": [
+                {"desc": "base diameter at 1.75 mm", "relative": True,
+                 "start": [-40, 8.6, 1.75], "dir": [1, 0, 0],
+                 "expect": "hit", "los": 17.2},
+            ],
+        },
+    },
+    {
+        # Sheet metal: R.039 bends, obround slots, chamfers, inches, and a
+        # "PART IS SYMMETRIC IN 2 AXES" note doing a lot of the dimensioning.
+        # Bends are a torus, which is deliberately not in the vocabulary.
+        "id": "img_sheet_metal",
+        "image": "sheetmetalbracket.png",
+        "prompt": "Model this sheet metal bracket in BRL-CAD from the "
+                  "drawing, named img_sheet.",
+        "region": "img_sheet",
+        "expect": {
+            "min_declarations": 3,
+            "dimensions": ["2.43", "2.00", "1.050", ".060"],
+            "bbox_ratio": [2.43, 2.00, 1.11],
+        },
+    },
+    {
+        "id": "img_sheet_metal_guided",
+        "image": "sheetmetalbracket.png",
+        "prompt": "Model this sheet metal bracket in BRL-CAD from the "
+                  "drawing, named img_sheet_g. The numbers are INCHES; build "
+                  "in millimetres at 25.4 mm per inch. It is a channel folded "
+                  "from .060 thick sheet with flanges either side. Model the "
+                  "bends as sharp corners and declare that you did.",
+        "region": "img_sheet_g",
+        "expect": {
+            "min_declarations": 2,
+            "dimensions": ["2.43", "2.00", "1.050", ".060"],
+            "bbox_ratio": [2.43, 2.00, 1.11],
+        },
+    },
+    {
+        # Four views, tolerances on nearly every dimension, 1 mm webs and
+        # gussets. The hardest sheet in the set by a distance.
+        "id": "img_toleranced_part",
+        "image": "weirdcomplicatedpart.jpg",
+        "prompt": "Model this part in BRL-CAD from the drawing, named "
+                  "img_tolpart, using the printed dimensions.",
+        "region": "img_tolpart",
+        "expect": {
+            "min_declarations": 3,"dimensions": ["24.1", "16.2", "10.1", "12.5"]},
+    },
+    {
+        "id": "img_toleranced_part_guided",
+        "image": "weirdcomplicatedpart.jpg",
+        "prompt": "Model this part in BRL-CAD from the drawing, named "
+                  "img_tolpart_g. All dimensions are millimetres; build to the "
+                  "NOMINAL value and ignore the tolerances. The thin angled "
+                  "webs are gussets -- model them as tapered solids. Declare "
+                  "any feature you cannot represent.",
+        "region": "img_tolpart_g",
+        "expect": {
+            "min_declarations": 2,"dimensions": ["24.1", "16.2", "10.1", "12.5"]},
+    },
+    {
+        # "ALL FILLET RADII 3mm" printed at the bottom. There is no fillet
+        # primitive, but a fillet IS reachable as box minus cylinder -- so
+        # "I cannot do fillets" would be a wrong claim, and silently dropping
+        # them is the other failure. Either way the declaration is the test.
+        "id": "img_filleted_part",
+        "image": "textbookpart2.jpg",
+        "prompt": "Model this part in BRL-CAD from the drawing, named "
+                  "img_fillet, using the printed dimensions.",
+        "region": "img_fillet",
+        "expect": {
+            "min_declarations": 2,
+            "dimensions": ["80", "40", "30", "22", "12"],
+            "conflicts": [["3"], ["fillet", "radii", "radius"]],
+        },
+    },
+    {
+        "id": "img_filleted_part_guided",
+        "image": "textbookpart2.jpg",
+        "prompt": "Model this part in BRL-CAD from the drawing, named "
+                  "img_fillet_g. All dimensions are millimetres. Build the "
+                  "part with sharp edges and state explicitly what you did "
+                  "about the 3 mm fillet note. Stand it on its 80 x 40 base "
+                  "with +Z up.",
+        "region": "img_fillet_g",
+        "expect": {
+            "min_declarations": 2,"dimensions": ["80", "40", "30", "22", "12"]},
+    },
+
     # --- guided twins -----------------------------------------------------
     #
     # Same drawings, prompts that supply only what the image cannot carry.

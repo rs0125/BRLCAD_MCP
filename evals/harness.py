@@ -53,6 +53,7 @@ from pathlib import Path
 
 import yaml
 
+from brlcad_mcp.config import settings
 from brlcad_mcp.server.tools import verify as V
 from brlcad_mcp.server.tools.assumptions import DECLARATIONS_FILE
 from brlcad_mcp.server.tools.helpers import parse_response
@@ -246,6 +247,15 @@ class Case:
     # fixes the shape while leaving mm-versus-cm a judgement call.  Scoring those
     # in absolute mm would fail a defensible reading of an unstated unit.
     bbox_ratio: list[float] | None = None
+    # Whether the case DICTATES which drawing dimension lies on which axis.
+    # False by default, and that default is the honest one: a drawing fixes the
+    # part's three lengths but almost never which way up you build it, so an
+    # axis-ordered bbox fails a correct model for its pose.  It did exactly
+    # that twice in one run -- an angle bracket built 103x120x103 was scored
+    # against 120x100x100 by ground truth that contradicted the very prompt
+    # telling it where to put the fold.  Set True only when the prompt really
+    # does pin the axes AND the expectation was written to match it.
+    oriented: bool = False
     # Optional reference image attached in agent mode.  For a DIMENSIONED
     # drawing the ground-truth spec comes from the numbers printed on it, so the
     # case measures whether the agent reads the drawing correctly -- not whether
@@ -274,6 +284,17 @@ class Case:
     # -- and measuring a hand-read bbox is far cheaper to author than a spec, so
     # requiring one was keeping geometry unscored on every image case.
     region_name: str = ""
+    # A case deliberately shipped WITHOUT ground truth, to answer a question
+    # about behaviour before investing in scoring it.  Marked rather than
+    # silently untested: the corpus guards assert that every other image case
+    # carries real assertions, and an unmarked gap should trip them.
+    provisional: bool = False
+    # Fewest ``declare_assumption`` rows this drawing ought to produce.  For an
+    # under-dimensioned sheet, declaring NOTHING is the failure: the part can
+    # only have been built by inventing numbers, and inventing them silently is
+    # the behaviour that makes such a drawing dangerous to work from.  This is
+    # the ambiguous tier's real assertion -- it has no envelope to check.
+    min_declarations: int = 0
 
     @property
     def has_spec(self) -> bool:
@@ -334,6 +355,9 @@ def case_from_dict(data: dict) -> Case:
         conflicts=expect.get("conflicts") or [],
         approval=data.get("approval") or Case.approval,
         region_name=data.get("region") or "",
+        provisional=bool(data.get("provisional")),
+        oriented=bool(data.get("oriented")),
+        min_declarations=int(expect.get("min_declarations") or 0),
         rays=[RayCheck(**r) for r in expect.get("rays", [])])
 
 
@@ -423,23 +447,44 @@ def _parse_los(nirt_output: str) -> float | None:
     return None
 
 
-def score_bbox(expected, region: str, prober) -> list:
-    """Compare measured outer lengths per axis, skipping unasserted ones.
+def score_bbox(expected, region: str, prober, oriented: bool = False) -> list:
+    """Compare measured outer lengths against the drawing's.
 
-    Axis-by-axis rather than all-or-nothing because a drawing can settle two
-    axes and leave the third genuinely open (see ``Case.bbox``).  Reporting each
-    separately also says WHICH axis is wrong, which is most of the diagnosis.
+    Two modes, and the default matters.  When the case pins the axes
+    (``oriented``), compare axis by axis and name the offending one -- that is
+    most of the diagnosis.  Otherwise assert only that each expected length
+    APPEARS among the measured three, matched greedily and each measurement used
+    once.  A drawing gives a part its lengths; it rarely says which way up to
+    build it, and scoring the pose as if it were the shape reports a correct
+    model as wrong.
+
+    Multiset containment rather than sorting both sides because an expectation
+    may leave an axis open (see ``Case.bbox``), and a partial triple cannot be
+    sorted against a full one.
     """
     if not expected:
         return []
     actual = V.parse_bb_lengths(parse_response(prober(f"bb {region}")))
-    checks = []
-    for axis, want, got in zip("XYZ", expected, actual):
-        if want is None:                       # not settled by the drawing
-            continue
-        checks.append((f"bbox:{axis}", V.bbox_matches((want,), (got,)),
-                       f"expected {want} mm, got {got} mm"))
-    return checks
+    if oriented:
+        checks = []
+        for axis, want, got in zip("XYZ", expected, actual):
+            if want is None:                   # not settled by the drawing
+                continue
+            checks.append((f"bbox:{axis}", V.bbox_matches((want,), (got,)),
+                           f"expected {want} mm, got {got} mm"))
+        return checks
+    remaining = [a for a in actual if a is not None]
+    missing = []
+    for want in [w for w in expected if w is not None]:
+        hit = next((a for a in remaining if V.bbox_matches((want,), (a,))), None)
+        if hit is None:
+            missing.append(want)
+        else:
+            remaining.remove(hit)
+    return [("bbox", not missing,
+             f"measured {tuple(actual)} mm contains every expected length"
+             if not missing else
+             f"expected {missing} mm among {tuple(actual)} mm (any axis order)")]
 
 
 _RATIO_TOL = 0.03
@@ -458,8 +503,12 @@ def score_bbox_ratio(expected, region: str, prober) -> list:
     actual = V.parse_bb_lengths(parse_response(prober(f"bb {region}")))
     if any(a is None for a in actual) or not any(actual):
         return [("bbox:ratio", False, f"could not measure {region}")]
-    want = [e / max(expected) for e in expected]
-    got = [a / max(actual) for a in actual]
+    want = sorted(e / max(expected) for e in expected)
+    got = sorted(a / max(actual) for a in actual)
+    # Sorted for the same reason score_bbox uses containment: a proportion is a
+    # statement about SHAPE, and a part laid on a different face has the same
+    # shape.  Comparing in axis order failed a correct sheet-metal bracket
+    # purely for having X and Y the other way round.
     ok = all(abs(w - g) <= _RATIO_TOL for w, g in zip(want, got))
     shape = ":".join(f"{v:.2f}" for v in got)
     return [("bbox:ratio", ok,
@@ -516,21 +565,36 @@ def score_rays(rays: list[RayCheck], region: str, prober) -> list:
     return checks
 
 
+# How many of a case's printed dimensions must appear in the agent's own words.
+# Not all of them: an agent that builds a part correctly routinely narrates only
+# the numbers it found notable, and demanding a full recital made this the single
+# largest source of failures in a run -- three of seven, every one on a model
+# that was geometrically fine.  A floor still catches the failure that matters,
+# which is reading almost nothing and inventing the rest.
+_DIMENSION_FRACTION = 0.7
+
+
 def score_dimensions(case: Case, proposal: str):
     """Check the agent's stated dimensions against the drawing's real numbers.
 
     Separate from the geometry checks on purpose: reading the drawing and
-    building from it are different failures, and a model that is internally
-    consistent but built from misread numbers is the more dangerous one.
+    building from what you read are different skills, and a case can fail one
+    while passing the other.
+
+    Weakest check in the harness, and knowingly so -- it substring-matches
+    prose, the same technique that had to be torn out of the conflict check.
+    It survives because it catches a real failure (numbers invented wholesale)
+    that engine truth cannot see, but it is scored as a FLOOR so that ordinary
+    variation in how much an agent narrates does not read as a defect.
     """
-    # Tool mode builds straight from the ground-truth spec, so there is no
-    # proposal to read: the check is not applicable rather than failing.
     if not case.dimensions or not proposal:
         return []
-    missing = [d for d in case.dimensions if d not in (proposal or "")]
-    return [("dimensions", not missing,
-             "all stated in the proposal" if not missing
-             else f"never stated: {', '.join(missing)}")]
+    found = [d for d in case.dimensions if d in proposal]
+    need = max(1, round(len(case.dimensions) * _DIMENSION_FRACTION))
+    missing = [d for d in case.dimensions if d not in proposal]
+    return [("dimensions", len(found) >= need,
+             f"stated {len(found)}/{len(case.dimensions)} "
+             f"(need {need}); missing: {', '.join(missing) or 'none'}")]
 
 
 def conflict_groups(conflicts) -> list[list[str]]:
@@ -580,6 +644,21 @@ def score_conflicts(case: Case, declarations: list[dict]):
              f"no single declaration names {want} (declared: {got})")]
 
 
+def score_declarations(case: Case, declarations: list[dict]):
+    """Did an under-dimensioned drawing produce the declarations it demands?
+
+    Deliberately a floor, not an exact count: how many separate assumptions a
+    reading breaks into is a judgement, but ZERO on a sheet that cannot
+    determine the part is not.
+    """
+    if not case.min_declarations:
+        return []
+    got = len(declarations)
+    return [("declarations", got >= case.min_declarations,
+             f"{got} declared, expected at least {case.min_declarations} "
+             f"for a drawing this under-dimensioned")]
+
+
 def score_case(case: Case, prober, rounds: int = 0,
                proposal: str = "", halts: int = 0,
                declarations: list[dict] | None = None) -> CaseResult:
@@ -591,7 +670,8 @@ def score_case(case: Case, prober, rounds: int = 0,
         # "built the right thing" -- the report marks these so the two are never
         # added up as if they measured the same thing.
         checks = (score_dimensions(case, proposal)
-                  + score_conflicts(case, declarations))
+                  + score_conflicts(case, declarations)
+                  + score_declarations(case, declarations))
         return CaseResult(case.id, all(ok for _, ok, _ in checks) and bool(checks),
                           checks, rounds=rounds, halts=halts,
                           declaration_only=True, declarations=declarations)
@@ -615,11 +695,12 @@ def score_case(case: Case, prober, rounds: int = 0,
         checks.extend(score_conflicts(case, declarations))
         return CaseResult(case.id, False, checks, rounds=rounds, halts=halts,
                           declarations=declarations)
-    checks.extend(score_bbox(case.bbox, case.region, prober))
+    checks.extend(score_bbox(case.bbox, case.region, prober, case.oriented))
     checks.extend(score_bbox_ratio(case.bbox_ratio, case.region, prober))
     checks.extend(score_rays(case.rays, case.region, prober))
     checks.extend(score_dimensions(case, proposal))
     checks.extend(score_conflicts(case, declarations))
+    checks.extend(score_declarations(case, declarations))
     passed = all(ok for _, ok, _ in checks)
     return CaseResult(case.id, passed, checks, rounds=rounds, halts=halts,
                       declarations=declarations)
@@ -933,6 +1014,19 @@ async def run_agent_mode(cases: list[Case], auto_approve: bool = False,
     from client_v2.skills import SkillRegistry
 
     model = build_model()
+    # Judge model, pinned independently of the worker.  When comparing two
+    # models on the same corpus, letting the visual check switch with the
+    # worker would confound the comparison: a difference in score could be
+    # either model building better or judging more leniently, and there would
+    # be no way to tell which.
+    judge = None
+    if os.getenv("EVAL_JUDGE_MODEL"):
+        from langchain_openai import ChatOpenAI
+
+        from client_v2.model import model_config
+        judge = ChatOpenAI(**model_config(
+            os.environ["EVAL_JUDGE_MODEL"],
+            settings.llm.reasoning_effort, settings.llm.temperature))
     registry = SkillRegistry.from_dir()
     # One log for the whole eval run: when a case fails, the reason is readable
     # afterwards instead of needing the run repeated.
@@ -962,6 +1056,7 @@ async def run_agent_mode(cases: list[Case], auto_approve: bool = False,
         graph = build_graph(worker_model=model, tools=tools, registry=registry,
                             worker_prompt=(unattended_worker_prompt
                                            if auto_approve else None),
+                            visual_model=judge,
                             checkpointer=MemorySaver(), log=log)
 
         async def drive(payload, cfg, answer):
@@ -1073,7 +1168,10 @@ async def run_agent_mode(cases: list[Case], auto_approve: bool = False,
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--mode", choices=("tool", "agent"), default="tool")
-    ap.add_argument("--case", help="run only this case id")
+    ap.add_argument(
+        "--case",
+        help=("run only these cases: an id, a comma-separated list, or a glob "
+              "such as '*_guided' to run one tier across the whole corpus"))
     ap.add_argument(
         "--auto-approve", action="store_true",
         help=("agent mode BASELINE: no human and no simulated user. Halts are "
@@ -1102,9 +1200,12 @@ def main() -> None:
 
     cases = load_cases()
     if args.case:
-        cases = [c for c in cases if c.id == args.case]
+        import fnmatch
+        wanted = [w.strip() for w in args.case.split(",") if w.strip()]
+        cases = [c for c in cases
+                 if any(c.id == w or fnmatch.fnmatch(c.id, w) for w in wanted)]
         if not cases:
-            sys.exit(f"no such case: {args.case}")
+            sys.exit(f"no case matches: {args.case}")
 
     run_dir = new_run_dir(args.mode, args.auto_approve, args.run_dir)
     route_artifacts_into(run_dir)           # before the MCP subprocess is spawned
