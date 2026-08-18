@@ -98,8 +98,12 @@ def test_a_kill_that_removed_nothing_is_flagged():
 
 
 def test_a_partial_kill_says_what_survived():
-    note = S.describe_effect(["a.s", "b.s"], ["b.s"])
-    assert "1 of 2" in note and "b.s" in note
+    """Both call forms: the optional command string drives the wildcard advice
+    and must not disturb the survivor listing."""
+    for args in ((["a.s", "b.s"], ["b.s"]),
+                 (["a.s", "b.s"], ["b.s"], "kill a.s b.s")):
+        note = S.describe_effect(*args)
+        assert "1 of 2" in note and "b.s" in note
 
 
 def test_a_clean_kill_adds_no_noise():
@@ -170,11 +174,6 @@ def test_explicitly_named_survivors_are_told_retrying_will_not_help():
     note = S.describe_effect(["a.s", "b.s"], ["a.s", "b.s"], "kill a.s b.s")
     assert "retrying the same command will not help" in note
     assert "wildcard" not in note                   # not the cause here
-
-
-def test_a_partial_removal_still_lists_what_survived():
-    note = S.describe_effect(["a.s", "b.s"], ["b.s"], "kill a.s b.s")
-    assert "1 of 2" in note and "b.s" in note
 
 
 def test_ray_artifacts_are_not_snapshotted(monkeypatch):

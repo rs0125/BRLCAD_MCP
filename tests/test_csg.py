@@ -6,6 +6,8 @@ the built geometry against, so it has to be right on its own terms.
 
 import math
 
+import pytest
+
 from brlcad_mcp.server.tools.csg import (
     expected_thickness,
     model_intervals,
@@ -24,51 +26,45 @@ def _plate(size=(20, 20, 5)):
 
 # --- primitives -----------------------------------------------------------
 
-def test_box_ray_through_the_middle():
-    (lo, hi), = part_intervals(_plate(), (0.0, 0.0, 50.0), _DOWN)
-    # Entering the 5 mm plate at z=2.5 means t=47.5, leaving at t=52.5.
-    assert (lo, hi) == (47.5, 52.5)
+# One ray against one primitive: the intervals are hand-derived from the
+# geometry, not read back from the implementation.  Parametrised rather than
+# eight functions because every case is the same call with different numbers --
+# and a table makes a missing case obvious in a way eight defs do not.
+_SPHERE = Part(name="b", shape="sphere", center=[0, 0, 0], radius=4)
+_CYL = Part(name="c", shape="cylinder", center=[0, 0, 0], height=[0, 0, 10],
+            radius=3)
 
 
-def test_box_ray_that_passes_beside_it():
-    assert part_intervals(_plate(), (100.0, 0.0, 50.0), _DOWN) == []
-
-
-def test_box_ray_parallel_to_a_face_outside_the_slab():
+@pytest.mark.parametrize("part,origin,direction,expected", [
+    # 5 mm plate centred on z=0: entered at z=2.5 (t=47.5), left at z=-2.5.
+    pytest.param(_plate(), (0.0, 0.0, 50.0), _DOWN, (47.5, 52.5),
+                 id="box-through-the-middle"),
+    pytest.param(_plate(), (100.0, 0.0, 50.0), _DOWN, None,
+                 id="box-passes-beside-it"),
     # Travelling in X at z=100: never inside the plate's z slab.
-    part = _plate()
-    assert part_intervals(part, (-50.0, 0.0, 100.0), (1.0, 0.0, 0.0)) == []
-
-
-def test_sphere_ray_through_centre_spans_the_diameter():
-    ball = Part(name="b", shape="sphere", center=[0, 0, 0], radius=4)
-    (lo, hi), = part_intervals(ball, (0.0, 0.0, 50.0), _DOWN)
-    assert math.isclose(hi - lo, 8.0)
-
-
-def test_sphere_ray_that_grazes_past_it_misses():
-    ball = Part(name="b", shape="sphere", center=[0, 0, 0], radius=4)
-    assert part_intervals(ball, (10.0, 0.0, 50.0), _DOWN) == []
-
-
-def test_cylinder_along_its_own_axis_is_bounded_by_the_end_caps():
-    cyl = Part(name="c", shape="cylinder", center=[0, 0, 0],
-               height=[0, 0, 10], radius=3)
-    (lo, hi), = part_intervals(cyl, (0.0, 0.0, 50.0), _DOWN)
-    assert math.isclose(hi - lo, 10.0)          # capped, not infinite
-
-
-def test_cylinder_crossed_sideways_spans_its_diameter():
-    cyl = Part(name="c", shape="cylinder", center=[0, 0, 0],
-               height=[0, 0, 10], radius=3)
-    (lo, hi), = part_intervals(cyl, (50.0, 0.0, 5.0), (-1.0, 0.0, 0.0))
-    assert math.isclose(hi - lo, 6.0)
-
-
-def test_cylinder_ray_outside_its_radius_misses():
-    cyl = Part(name="c", shape="cylinder", center=[0, 0, 0],
-               height=[0, 0, 10], radius=3)
-    assert part_intervals(cyl, (5.0, 0.0, 50.0), _DOWN) == []
+    pytest.param(_plate(), (-50.0, 0.0, 100.0), (1.0, 0.0, 0.0), None,
+                 id="box-parallel-to-a-face-outside-the-slab"),
+    # r=4 at the origin: enters z=4, leaves z=-4, so a chord of one diameter.
+    pytest.param(_SPHERE, (0.0, 0.0, 50.0), _DOWN, (46.0, 54.0),
+                 id="sphere-through-the-centre-spans-the-diameter"),
+    pytest.param(_SPHERE, (10.0, 0.0, 50.0), _DOWN, None,
+                 id="sphere-grazed-past"),
+    # Down its own axis the end caps bound it -- capped, not infinite.
+    pytest.param(_CYL, (0.0, 0.0, 50.0), _DOWN, (40.0, 50.0),
+                 id="cylinder-along-its-axis-is-bounded-by-the-caps"),
+    # Crossed sideways at mid-height: x=+3 in to x=-3 out.
+    pytest.param(_CYL, (50.0, 0.0, 5.0), (-1.0, 0.0, 0.0), (47.0, 53.0),
+                 id="cylinder-crossed-sideways-spans-its-diameter"),
+    pytest.param(_CYL, (5.0, 0.0, 50.0), _DOWN, None,
+                 id="cylinder-ray-outside-its-radius"),
+])
+def test_one_ray_against_one_primitive(part, origin, direction, expected):
+    got = part_intervals(part, origin, direction)
+    if expected is None:
+        assert got == []
+    else:
+        (lo, hi), = got
+        assert (lo, hi) == pytest.approx(expected)
 
 
 def test_geometry_behind_the_ray_origin_is_not_counted():
@@ -99,7 +95,6 @@ def test_unknown_shape_raises_rather_than_yielding_no_intervals():
     getting here means the build-time whitelist and the interval table have
     drifted apart, and that has to be loud.
     """
-    import pytest
     with pytest.raises(ValueError, match="no ray-intersection function"):
         part_intervals(Part(name="x", shape="torus"), (0, 0, 1), _DOWN)
 

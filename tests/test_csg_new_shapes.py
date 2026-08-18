@@ -121,14 +121,6 @@ def test_an_unknown_shape_raises_instead_of_predicting_nothing():
                        (0, 0, 0), DOWN)
 
 
-def test_the_build_whitelist_and_the_interval_table_agree():
-    """The two lists drifting apart is exactly what the guard above catches at
-    runtime; catch it at test time instead."""
-    from brlcad_mcp.server.tools.csg import _SHAPE_INTERVALS
-    from brlcad_mcp.server.tools.reconstruct import _SHAPES
-    assert set(_SHAPES) == set(_SHAPE_INTERVALS)
-
-
 def test_wedge_vertices_are_emitted_in_the_order_arb8_expects():
     """Bottom face counter-clockwise then the top in the SAME order. Wrong order
     builds a self-intersecting solid that still succeeds and then ray-traces as

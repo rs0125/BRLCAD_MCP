@@ -196,31 +196,3 @@ def listener(monkeypatch):
         yield srv
     finally:
         srv.stop()
-
-
-# ---------------------------------------------------------------------------
-# Opt-in marker for natural-language (LLM) tests
-# ---------------------------------------------------------------------------
-
-def pytest_addoption(parser):
-    parser.addoption(
-        "--run-llm",
-        action="store_true",
-        default=False,
-        help="run natural-language tests that call a real LLM (costs money)",
-    )
-
-
-def pytest_configure(config):
-    config.addinivalue_line(
-        "markers", "llm: natural-language test that calls a real LLM backend"
-    )
-
-
-def pytest_collection_modifyitems(config, items):
-    if config.getoption("--run-llm"):
-        return
-    skip = pytest.mark.skip(reason="needs --run-llm (calls a real LLM)")
-    for item in items:
-        if "llm" in item.keywords:
-            item.add_marker(skip)
