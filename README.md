@@ -7,6 +7,7 @@ A natural language interface for [BRL-CAD](https://brlcad.org/) solid modeling, 
 ## Table of Contents
 
 - [Overview](#overview)
+- [Project Status](#project-status)
 - [Architecture](#architecture)
 - [The Agent (client-v2)](#the-agent-client-v2)
 - [Prerequisites](#prerequisites)
@@ -14,7 +15,10 @@ A natural language interface for [BRL-CAD](https://brlcad.org/) solid modeling, 
 - [Configuration](#configuration)
 - [Usage](#usage)
 - [Available Tools](#available-tools)
+- [Evaluation](#evaluation)
+- [Sample Data](#sample-data)
 - [Adding New Tools](#adding-new-tools)
+- [Testing](#testing)
 - [Project Structure](#project-structure)
 - [License](#license)
 
@@ -32,13 +36,37 @@ The system is built on three layers:
 
 ---
 
+## Project Status
+
+**What works today.** Natural-language and image-driven modelling against a live
+BRL-CAD, end to end: a reference drawing goes in, a parametric CSG region comes
+out, and the result is checked against BRL-CAD's own raytracer rather than
+against the spec the agent invented.
+
+At a glance:
+
+| | |
+|---|---|
+| MCP tools | **21**, typed and validated |
+| Skills (behaviour as data, editable at runtime) | **13** YAML definitions |
+| Spec primitives | box, cylinder, sphere, wedge, cone |
+| Evaluation corpus | **54 cases** over **20 real engineering drawings** |
+| Test suite | 435 tests, no network or API key required |
+
+**How correctness is established.** Reliability is a measured number, not an
+impression — see [Evaluation](#evaluation). Every geometry verdict comes from
+engine truth (`bb` plus `nirt` rays) compared against ground truth authored by
+hand from the drawing. The vision check is advisory and cannot overturn it.
+
+---
+
 ## Architecture
 
 The system is composed of three layers that communicate in a chain:
 
 - **Client** (`client_v2/`) — A LangGraph `StateGraph` of thin agents. Intake classifies the turn as chat or work; the planner turns work into an ordered, parameterized plan over the skill registry; an authorization gate can genuinely halt the graph for a user decision; the plan then runs either deterministically (executor, no model calls) or through the worker (the **only** agent with tool access); the verifier gates on engine truth and can kick work back to the planner; the formatter produces the final answer. It maintains a **persistent MCP session** with the server subprocess over **stdio**, so all tool calls share the same server process and TCP connection to MGED.
 
-- **Server** (`server/app.py` + `server/tools/*`) — A FastMCP tool server that exposes 20 typed, validated tools: dedicated geometry tools (sphere, cylinder, box, booleans), meta-tools for dynamic command discovery and execution, and higher-level tools for overlap resolution, model health auditing, spec-driven building, verification, rendering, and rollback. When a tool is invoked, it builds the corresponding MGED command(s) and sends them to BRL-CAD over a **persistent** connection via the transport layer (`transport/socket_bridge.py`). Responses are keyed off `SUCCESS:`/`ERROR:` prefixes that the transport derives from the listener's framed status.
+- **Server** (`server/app.py` + `server/tools/*`) — A FastMCP tool server that exposes 21 typed, validated tools: dedicated geometry tools (sphere, cylinder, box, booleans), meta-tools for dynamic command discovery and execution, and higher-level tools for overlap resolution, model health auditing, spec-driven building, verification, rendering, rollback, and recording the assumptions a build rests on. When a tool is invoked, it builds the corresponding MGED command(s) and sends them to BRL-CAD over a **persistent** connection via the transport layer (`transport/socket_bridge.py`). Responses are keyed off `SUCCESS:`/`ERROR:` prefixes that the transport derives from the listener's framed status.
 
 - **Transport** (`transport/socket_bridge.py`) — Speaks the libmcpcad length-prefixed frame protocol (`MC` + u32 big-endian length + payload) in both directions, keeping a single long-lived connection so MGED state persists across calls. It translates the listener's `OK` / `ERR <code>` status into the `SUCCESS:` / `ERROR:` prefix the tools expect. The command text on the wire is plain MGED syntax — only the framing is structured.
 
@@ -105,9 +133,13 @@ touching the repo.
 ### Verification is engine truth, not vibes
 
 The gate is BRL-CAD's own raytracer, not a render and not a vision model.
-`verify_model_dimensions` samples the built region with ~40 rays and compares, per
-ray, the material thickness the spec predicts (evaluated analytically) against
-the thickness `nirt` reports, plus a bounding-box check. One shape-agnostic
+`verify_model_dimensions` samples the built region and compares, per ray, the
+material thickness the spec predicts (evaluated analytically) against the
+thickness `nirt` reports, plus a bounding-box check. The sample is a 3×3 grid on
+each axis — 27 rays — plus 15 more per subtracted cavity: one down its centre on
+each axis and four offset toward its walls, which is what makes a cavity of the
+wrong *diameter* detectable rather than merely present. A 30-part LEGO brick with
+three bores is therefore checked with 72 rays, a single cone with 27. One shape-agnostic
 comparison catches a subtraction that silently did not apply, a cavity in the
 wrong place or of the wrong size or diameter, a blind pocket and its depth, and
 wrong overall dimensions. A failure fails the turn and kicks it back to the
@@ -168,20 +200,9 @@ images are replaced by their byte count. A logging failure never costs a build.
 
 ### Evals
 
-`evals/` scores the pipeline against ground truth rather than against the spec
-the agent invented:
-
-```bash
-python -m evals.harness              # tool mode: build from ground truth (no API key)
-python -m evals.harness --mode agent # agent mode: build from the prompt
-python -m evals.harness --case l_bracket
-```
-
-Cases live in `evals/cases/*.yaml`, each with a natural-language prompt (and
-optionally a reference `image:`), a ground-truth spec, and explicit ray/bbox
-assertions. Agent mode is multi-turn, so the workflow's confirmation step is
-exercised rather than bypassed. Both modes need a running listener; tool mode
-needs no API key and is the one that catches pipeline regressions.
+`evals/` scores the pipeline against ground truth read off the drawing, rather
+than against the spec the agent invented. It has its own section below —
+see [Evaluation](#evaluation).
 
 ---
 
@@ -471,7 +492,43 @@ Batch several `view:lighting` variants into one timestamped folder as small labe
 
 #### `build_from_spec`
 
-Build a CSG region deterministically from a JSON spec (box / cylinder / sphere parts, unioned or subtracted) and render the requested check views in one step. Saves a versioned spec so edits stay reversible.
+Build a CSG region deterministically from a JSON spec and render the requested check views in one step. Saves a versioned spec so edits stay reversible.
+
+Five primitives, unioned or subtracted:
+
+| shape | parameters | what it is for |
+|---|---|---|
+| `box` | `center`, `size` | axis-aligned blocks, plates, walls |
+| `cylinder` | `center` (base), `height` vector, `radius` | bores, bosses, studs, pins |
+| `sphere` | `center`, `radius` | domes, ball ends |
+| `wedge` | `center`, `size`, `top_size` | a box whose top face has its own footprint: tapered flanks, chamfers, and triangular gussets via `top_size: [x, 0]` |
+| `cone` | `center` (base), `height` vector, `radius`, `top_radius` | truncated cones — tapered bosses, countersinks, turned profiles |
+
+The vocabulary is deliberately far smaller than BRL-CAD's 41 primitives, and the
+constraint is **not** what the engine can build — it builds all of them, and
+`execute_command` reaches any of them. It is what the analytic CSG kernel can
+intersect a ray with, because that prediction is what verification compares
+against. A primitive without an exact ray-intersection function cannot be
+verified, so adding one means adding its maths to `server/tools/csg.py` and
+nothing else.
+
+#### `declare_assumption`
+
+Record a decision the model rests on — `topic`, `chose`, `over`, `reason` — as a
+row beside the saved spec, so it survives the conversation.
+
+Declared whenever the reference does not determine an answer: a dimension that is
+missing, ambiguous, or contradicted elsewhere on the drawing. A model built from
+a drawing is only as trustworthy as the readings behind it, and those readings
+are otherwise invisible — a sentence in a reply that scrolls away, leaving the
+geometry looking authoritative while the judgement that produced it is gone. An
+undeclared assumption is indistinguishable from a misread, both to a reviewer and
+to the record.
+
+Because it is structured rather than prose, `promote_draft` can report a build's
+assumptions from the record instead of from the agent's memory of what it said
+several turns ago, and the evaluation harness can check that a contradiction was
+actually acknowledged rather than silently resolved.
 
 #### `edit_build` / `undo_build` / `list_builds`
 
@@ -482,6 +539,161 @@ Edit a spec-backed model with a small list of ops (move / update / add / remove 
 #### `restore_backup` / `list_backups`
 
 Raw destructive commands run through `execute_command` (`kill`, `rm`, `mv`, `r` redefining an existing region…) are auto-snapshotted first: the objects they would delete or overwrite are `keep`-exported to a small `.g` under `<render_dir>/backups/`. `restore_backup` rolls back the last one (via `kill` + `dbconcat`); `list_backups` lists the restore points. This is the safety net for hand edits; spec-backed models should prefer `undo_build`.
+
+---
+
+## Evaluation
+
+The harness answers the question the project could not previously answer with a
+number: *how often does this actually produce correct geometry from a drawing?*
+
+The distinction that makes it worth trusting: `verify_model_dimensions` proves a
+build matches **the spec the agent wrote**, which can never tell you the spec
+matched the drawing — there, the spec is both the input and the standard. The
+harness instead compares the build against **ground truth read off the drawing by
+hand**, so the agent is never grading its own homework.
+
+### Running it
+
+```bash
+./evals/run.sh                                          # tool mode -- no API key
+./evals/run.sh --mode agent --auto-approve              # unattended baseline
+./evals/run.sh --mode agent --case '*_guided'           # one tier across the corpus
+./evals/run.sh --mode agent --auto-approve --repeat 3   # pass^k
+```
+
+`evals/run.sh` owns the listener: it starts one on a throwaway `.g`, waits for
+the socket, runs the harness, and kills it on the way out.
+
+| mode | what it measures |
+|---|---|
+| `tool` | builds each case from its ground-truth spec. Deterministic and **needs no API key** — this is the one that catches pipeline regressions, and the quickest way to confirm an install works. |
+| `agent` | gives the agent the prompt and scores whatever it built. This is the reliability metric. |
+
+Agent mode has two shapes, and comparing them is the point. By default the case's
+`approval` answers the workflow's confirmation halt, so the human-in-the-loop
+path is exercised rather than bypassed. With `--auto-approve` there is no human
+and no simulated user: the worker prompt gains a delta telling it to resolve
+ambiguity itself and record each decision with `declare_assumption`. The agent is
+then the only stochastic thing in the loop, so a failure is attributable to it
+and nothing else.
+
+`OPENAI_MODEL` selects the worker and `EVAL_JUDGE_MODEL` pins the vision judge
+independently — without that, comparing two models would also change the judge,
+and a score difference could be either model building better or judging more
+leniently with no way to separate them.
+
+### The corpus
+
+54 cases over 20 drawings: sheet-metal brackets, LEGO bricks, plates and stepped
+blocks from engineering-drawing textbooks, a dual-dimensioned bracket, hand
+sketches, a photograph, and a turned chess piece.
+
+Every drawing appears twice — once with the terse instruction a real user would
+type, and once **guided**, supplying only what the image cannot carry: the unit,
+the placement convention, which of two conflicting callouts controls. A guided
+prompt never states what the drawing already shows, because every sentence added
+removes a measurement. The gap between a pair is what disambiguation is worth.
+
+Cases sit in four tiers, and a tier is a claim about the **drawing**, not about
+difficulty:
+
+| tier | scored on |
+|---|---|
+| **easy** | full envelope plus feature rays |
+| **medium** | envelope plus one deliberate trap — decimal inches with no unit word, `22 [0.87]` dual dimensioning, inner-versus-outer flange readings |
+| **ambiguous** | **no envelope at all.** These sheets genuinely under-determine the part, so asserting a bounding box would score *our* reading against the agent's. Judged on printed features and on whether the gaps were declared. |
+| **hard** | expected to fail, and kept for that. A corpus where everything passes measures nothing. |
+
+Cases live in `evals/cases/*.yaml` (hand-authored specs) and
+`evals/image_cases.py` (a drawing plus the sentence a user would type).
+
+### What a case can assert
+
+| check | compares |
+|---|---|
+| `spec` | the full sweep: existence, derived bounding box, and a sampled ray per feature |
+| `bbox` | outer lengths. Orientation-free by default — a drawing fixes a part's three lengths, rarely which way up you build it — with `oriented: true` where the prompt genuinely pins the axes |
+| `bbox_ratio` | proportions only, normalised. The one geometric thing a reference with no printed unit can assert |
+| `rays` | hand-authored probes: absolute, offset from the *measured* corner, or fractions of the measured bounding box |
+| `dimensions` | a floor on how many of the printed values appear in the agent's own words |
+| `conflicts` | that a single `declare_assumption` row names **both sides** of a contradiction. Each side is a group of equivalent framings, since a 6.3 mm cavity against a 1.0 mm roof on a 9.6 mm body is the same clash as 6.3 against 8.6 |
+| `min_declarations` | a floor on assumptions for an under-dimensioned sheet. Declaring *nothing* there is the failure: the geometry can only have come from invented numbers, and inventing them silently is what makes such a drawing dangerous to work from |
+
+A case passes only if every one of its checks passes.
+
+### How ground truth earns trust
+
+Ground truth is worth nothing unless it is right, so every check is validated in
+**both directions** before being relied on:
+
+- a **correct** model must pass — and for the scale-free checks, pass at two
+  different scales;
+- a **plausibly wrong** model must fail: continuous ridges instead of eight
+  separate studs, a square cake instead of a round one, a 57 mm cube with the
+  grooves never cut, a one-tier cake with exactly the right envelope.
+
+That second half is the important one. Several of those wrong models satisfy the
+bounding box **exactly** and are caught only by the rays — which is the whole
+argument for the rays existing.
+
+### pass^k
+
+`--repeat K` runs the suite K times and reports `pass^k` (every run passed)
+beside `pass@1` (the average single run). The gap between them *is* the
+reliability signal: a single pass can report a figure that looks finished while
+repeats reveal cases that only pass sometimes.
+
+The suite repeats as a whole rather than each case K times in a row, so an
+interrupted job still holds one sample of everything instead of ten samples of
+the first case. Results are appended and flushed after each pass, and the runner
+restarts the listener between passes, so a long job survives interruption.
+
+### What a run produces
+
+One self-contained directory per run under `evals/runs/<stamp>_<shape>/`, with
+`latest` symlinked to the newest:
+
+```
+report.txt       the verdict per case, with failing checks named
+results.jsonl    one row per case per pass -- every check and its outcome
+log.jsonl        every model call, node write and interrupt
+renders/         the check views the agent produced
+models/          per-case standalone .g   (open with: mged <file>)
+specs/           saved build specs, and assumptions.jsonl
+backups/         restore points from destructive raw commands
+```
+
+Everything a verdict depends on is in that directory rather than in live process
+state, so a finished run can be re-scored under revised checks without
+rebuilding any geometry.
+
+---
+
+## Sample Data
+
+`evals/images/` holds the 20 reference drawings the corpus is built from, in the
+repository so a case is runnable from a fresh clone rather than depending on one
+machine's downloads folder. They span the range deliberately:
+
+| kind | examples | what it exercises |
+|---|---|---|
+| Clean dimensioned drawings | `roundbracket.jpg`, `engineeringdrawing.jpg` | multi-view reading, section views, an explicit "ALL DIMENSIONS IN mm" |
+| Stepped blocks | `textbook3.jpg`, `textbook3.jpeg` | pure orthogonal CSG, every dimension printed |
+| LEGO bricks and plates | `lego.jpg`, `lego2.jpg`, `lego3.jpg` | repeated features, stud grids, and one genuinely self-contradictory sheet |
+| Unit traps | `2headedpart.jpg`, `sheetmetalbracket.png`, `metalbracketcomplicated2.jpg` | decimal inches with no unit word, and mm with bracketed inches |
+| Under-dimensioned sheets | `triangularpartdrawing.jpg`, `textbookbracket.png` | whether the agent declares what the drawing never states |
+| Hand-drawn and photographed | `handdrawnpart.jpg`, `birthdaycake.jpg`, `rubic.jpg` | hostile input: a sketch photographed mid-draw, a sketch with no unit, a photo with no dimensions at all |
+| Turned profiles | `chesspieces.png` | curved profiles against a straight-sided primitive set |
+
+To point a case at a drawing of your own, drop it in `evals/images/` and add an
+entry to `evals/image_cases.py` — a bare filename resolves against that
+directory, and absolute or `~` paths work too for a one-off.
+
+One drawing in the folder, `deltabracket.jpg`, is deliberately **not** in the
+corpus: several of its rotated dimensions are not legible enough at source
+resolution to hand-author ground truth worth trusting, and wrong ground truth is
+worse than none. It is kept as a candidate for a better scan.
 
 ---
 
@@ -541,24 +753,21 @@ tools, and agent are exercised end to end over a loopback socket.
 
 ```bash
 pip install -e '.[dev]'
-
-# deterministic tests — fast, hermetic, CI-safe (no network, no LLM)
-pytest
-
-# also run the natural-language tests (real LLM; needs OPENAI_API_KEY, costs money)
-pytest --run-llm
+pytest          # 435 tests, hermetic and CI-safe: no network, no LLM, no API key
 ```
-
-Natural-language tests are marked `llm` and skipped by default. They drive
-the real LangGraph agent against the mock listener and assert on the
-resulting fake-database state, so they validate the full
-prompt → LLM → tool → transport chain without a live BRL-CAD instance.
 
 Every part of the v2 graph is tested with injected fakes (`tests/v2_fakes.py`) —
 models, tools, classifier and registry are all constructor arguments — so routing,
 planning, execution, verification, kick-backs and the authorization halt are all
-exercised offline. Reliability of the *whole pipeline against real geometry* is a
-separate question, measured by the [eval harness](#evals) rather than by pytest.
+exercised offline. The analytic CSG kernel (`server/tools/csg.py`) is pure maths
+and tested directly, primitive by primitive.
+
+Every test runs on every invocation; nothing is skipped or gated behind a flag,
+because a test that never executes is not coverage.
+
+Reliability of the *whole pipeline against real geometry* is a separate question,
+measured by the [eval harness](#evaluation) rather than by pytest — pytest tells
+you the plumbing is sound, the harness tells you how often the geometry is right.
 
 ---
 
@@ -597,8 +806,12 @@ brlcad-mcp/
 │       ├── attachments.py           #   /image, /paste, command parsing
 │       └── trace.py                 #   debug trace formatting
 ├── evals/
+│   ├── run.sh                       # starts a throwaway listener, runs the harness
 │   ├── harness.py                   # scores tool mode and agent mode vs ground truth
-│   └── cases/*.yaml                 # golden cases (prompt, image, spec, assertions)
+│   ├── image_cases.py               # drawing + the sentence a user would type
+│   ├── cases/*.yaml                 # golden cases (prompt, image, spec, assertions)
+│   ├── images/                      # the 20 reference drawings the corpus is built on
+│   └── runs/<stamp>/                # one self-contained directory per run (gitignored)
 ├── src/
 │   └── brlcad_mcp/
 │       ├── __init__.py              # Package metadata and version
@@ -634,8 +847,8 @@ brlcad-mcp/
 │   ├── test_transport.py            # real bridge ↔ mock frame listener
 │   ├── test_tools.py                # server tools over the mock listener
 │   ├── test_csg.py / test_verify.py # verification kernel + verdicts
-│   ├── test_client_v2_*.py          # one file per v2 component
-│   └── test_agent_nl.py             # natural-language tests (opt-in: --run-llm)
+│   ├── test_evals_harness.py        # the harness: scoring, corpus invariants
+│   └── test_client_v2_*.py          # one file per v2 component
 ├── examples/
 │   └── nl_demo.py                   # scripted natural-language walkthrough
 ├── legacy/
