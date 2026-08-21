@@ -55,7 +55,7 @@ only for the agent:
 OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-5.6-sol
 BRLCAD_HOST=127.0.0.1
-BRLCAD_PORT=6000
+BRLCAD_PORT=5555
 ```
 
 Environment variables override `.env` if you prefer to keep the key out of a
@@ -95,13 +95,13 @@ Start a listener on a copy of a model, in one terminal:
 
 ```bash
 cp ~/models/thing.g /tmp/thing-work.g
-/path/to/brlcad/build/src/libmcpcad/tests/mcpcad_test_server 6000 /tmp/thing-work.g
+/path/to/brlcad/build/src/libmcpcad/tests/mcpcad_test_server 5555 /tmp/thing-work.g
 ```
 
 Or inside MGED, if you want to watch geometry appear in the live view:
 
 ```
-mged> mcp_listen 6000
+mged> mcp_listen 5555
 ```
 
 Then in a second terminal:
