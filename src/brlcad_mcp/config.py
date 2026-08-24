@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,6 +45,37 @@ def _env_num(name: str, default: str, cast):
         return cast(default)
 
 
+def _env_first(names: tuple[str, ...], default: str = "") -> str:
+    """First of several environment variables that is set and non-blank.
+
+    Lets a general ``LLM_*`` name take precedence while the original
+    ``OPENAI_*`` name keeps working, so existing ``.env`` files and the shipped
+    release are unaffected by the move to configurable providers.
+    """
+    for name in names:
+        value = (os.getenv(name) or "").strip()
+        if value:
+            return value
+    return default
+
+
+def _env_json_obj(name: str) -> dict:
+    """Parse an environment variable holding a JSON object, or return {}.
+
+    This is the escape hatch for provider kwargs we do not model, so a typo in
+    it must not stop the client starting -- and a JSON scalar or list is not a
+    kwargs mapping, so those are rejected too.
+    """
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     """Parse a truthy/falsy environment variable (1/true/yes/on)."""
     value = os.getenv(name)
@@ -68,31 +100,62 @@ class BRLCADConfig:
 
 @dataclass(frozen=True)
 class LLMConfig:
-    """Settings for the OpenAI / LLM backend.
+    """Which model backend to talk to, and how.
 
-    ``model`` defaults to GPT-5.6 Sol.  Confirm the exact model id in your
-    OpenAI dashboard and override with OPENAI_MODEL if it differs.  Sol is a
-    reasoning-style model: it uses ``reasoning_effort`` and rejects a
-    ``temperature`` argument, so the client picks the right one automatically
-    (see agent._build_model).
+    Any LangChain chat integration can be used, not just OpenAI.  Two ways in:
+
+    * **An OpenAI-dialect endpoint** -- leave ``provider`` at ``openai`` and set
+      ``base_url``.  The provider name there means the *wire format*, not the
+      vendor, so llama.cpp's server, vLLM, LM Studio, Ollama's ``/v1`` port,
+      LocalAI or a corporate gateway all work with no extra package.
+    * **A dedicated integration** -- set ``provider`` to ``anthropic``,
+      ``google_genai``, ``ollama``, ``bedrock`` and so on, and install that
+      provider's ``langchain-*`` package.
+
+    Every setting has an ``LLM_*`` name.  The original ``OPENAI_*`` names still
+    work as fallbacks, so an existing ``.env`` needs no edit.
     """
 
+    provider: str = field(
+        default_factory=lambda: _env_first(("LLM_PROVIDER",), "openai")
+    )
     api_key: str = field(
-        default_factory=lambda: os.getenv("OPENAI_API_KEY", "")
+        default_factory=lambda: _env_first(("LLM_API_KEY", "OPENAI_API_KEY"))
     )
     model: str = field(
-        default_factory=lambda: _env_str("OPENAI_MODEL", "gpt-5.6-sol")
+        default_factory=lambda: _env_first(("LLM_MODEL", "OPENAI_MODEL"),
+                                           "gpt-5.6-sol")
+    )
+    # Endpoint override.  Both OPENAI_* spellings are accepted because the
+    # OpenAI SDK reads OPENAI_BASE_URL while langchain-openai reads
+    # OPENAI_API_BASE, and someone following either doc should just work.
+    base_url: str = field(
+        default_factory=lambda: _env_first(
+            ("LLM_BASE_URL", "OPENAI_BASE_URL", "OPENAI_API_BASE")
+        )
+    )
+    # OpenAI wire dialect: 'responses' or 'chat'.  Blank means decide from
+    # whether base_url is set -- see providers.resolve_dialect.  Only consulted
+    # for the OpenAI family; other providers have no such concept.
+    api_dialect: str = field(
+        default_factory=lambda: _env_first(("LLM_API",))
     )
     temperature: float = field(
-        default_factory=lambda: _env_num("OPENAI_TEMPERATURE", "0", float)
+        default_factory=lambda: _env_num("LLM_TEMPERATURE",
+                                         str(_env_num("OPENAI_TEMPERATURE",
+                                                      "0", float)), float)
     )
-    # Reserved for reasoning models.  NOTE: on /v1/chat/completions (what the
-    # client uses) reasoning models reject reasoning_effort together with
-    # function tools unless it is 'none', so the client forces 'none' regardless
-    # of this value.  Extended effort (high/max) would need the Responses API.
+    # Reasoning/thinking effort: minimal|low|medium|high.  LangChain treats this
+    # as a standard parameter and each provider translates it (OpenAI reasoning
+    # effort, Anthropic thinking budget, ...), so one setting covers them all.
     reasoning_effort: str = field(
-        default_factory=lambda: os.getenv("OPENAI_REASONING_EFFORT", "")
+        default_factory=lambda: _env_first(("LLM_EFFORT",
+                                            "OPENAI_REASONING_EFFORT"))
     )
+    # Arbitrary extra kwargs as JSON, merged last and winning.  This is what
+    # makes a provider quirk we do not model a config change rather than a
+    # patch, e.g. {"num_predict": 512} for Ollama.
+    extra: dict = field(default_factory=lambda: _env_json_obj("LLM_EXTRA"))
 
 
 @dataclass(frozen=True)

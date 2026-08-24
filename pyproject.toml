@@ -29,6 +29,21 @@ dev = [
     "ruff",
     "mypy",
 ]
+# Model backends other than OpenAI.  Deliberately optional: an OpenAI-dialect
+# endpoint (any gateway, vLLM, llama.cpp, LM Studio, Ollama's /v1 port) needs
+# none of these, and a restricted site should install only what it is allowed
+# to.  See docs/PROVIDERS.md.
+anthropic = ["langchain-anthropic"]
+google = ["langchain-google-genai"]
+ollama = ["langchain-ollama"]
+bedrock = ["langchain-aws"]
+# Everything above, for testing across backends.
+all-providers = [
+    "langchain-anthropic",
+    "langchain-google-genai",
+    "langchain-ollama",
+    "langchain-aws",
+]
 
 [project.scripts]
 brlcad-mcp = "brlcad_mcp.cli:main"

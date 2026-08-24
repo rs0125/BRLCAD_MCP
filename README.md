@@ -210,10 +210,12 @@ see [Evaluation](#evaluation).
 
 - **Python 3.10+**
 - **BRL-CAD** with the `libmcpcad` listener (the `mcp_listen` MGED command — see the [`libmcpcad` branch](https://github.com/rs0125/brlcad/tree/libmcpcad))
-- **OpenAI API key** — the default model is set by `OPENAI_MODEL` (see
-  [Configuration](#configuration)). A reasoning-capable model is recommended; the
-  client uses the Responses API and preserves reasoning items across tool calls.
-  Image input requires a vision-capable model.
+- **An API key for a model backend.** OpenAI by default. Any LangChain chat
+  backend can be used instead, including Claude, Gemini, Ollama, Bedrock, or any
+  OpenAI-compatible endpoint such as a local model or a company gateway. See
+  [Model backends](docs/PROVIDERS.md). A reasoning-capable model is recommended,
+  the model must support tool calling, and image input requires a vision-capable
+  model.
 
 ---
 
@@ -255,12 +257,22 @@ see [Evaluation](#evaluation).
 
 All configuration is managed through a `.env` file in the project root. A template is provided in `.env.example`.
 
+The model backend is configurable: OpenAI by default, or Claude, Gemini, Ollama,
+Bedrock, a local model, or a company gateway. [Model
+backends](docs/PROVIDERS.md) covers the two ways in and the trade-off between
+them. The older `OPENAI_*` names still work as fallbacks, so an existing `.env`
+needs no edit.
+
 | Variable              | Description                                  | Default       |
 |-----------------------|----------------------------------------------|---------------|
-| `OPENAI_API_KEY`      | Your OpenAI API key (required)               | --            |
-| `OPENAI_MODEL`        | The OpenAI model to use (confirm exact id in your dashboard) | `gpt-5.6-sol` |
-| `OPENAI_REASONING_EFFORT` | For reasoning models: `low`/`medium`/`high`/`max` (blank = `high`) | -- |
-| `OPENAI_TEMPERATURE`  | Sampling temperature for non-reasoning models (e.g. `gpt-4o`) | `0`           |
+| `LLM_PROVIDER`        | Backend, or the OpenAI wire format for a compatible endpoint | `openai` |
+| `LLM_MODEL`           | Model id, passed through untouched           | `gpt-5.6-sol` |
+| `LLM_API_KEY`         | API key for the backend                      | --            |
+| `LLM_BASE_URL`        | Endpoint override — a gateway, or a local model | --         |
+| `LLM_EFFORT`          | Reasoning effort: `minimal`/`low`/`medium`/`high` | provider default |
+| `LLM_API`             | OpenAI wire dialect: `responses`/`chat`      | auto          |
+| `LLM_TEMPERATURE`     | Sampling temperature for non-reasoning models (e.g. `gpt-4o`) | `0`           |
+| `LLM_EXTRA`           | Extra backend kwargs as JSON, merged last    | `{}`          |
 | `BRLCAD_HOST`         | Host where the libmcpcad listener is running | `127.0.0.1`   |
 | `BRLCAD_PORT`         | Port the listener (`mcp_listen`) is bound to | `5555`        |
 | `BRLCAD_TIMEOUT`      | Socket timeout in seconds                    | `5.0`         |
@@ -271,6 +283,44 @@ All configuration is managed through a `.env` file in the project root. A templa
 | `CLIENT_V2_DEBUG`     | Show the live agent trace instead of only the final answer (see [Watching a turn](#watching-a-turn)) | `false` |
 | `CLIENT_V2_LOG_DIR`   | Where per-run JSONL logs are written         | `~/brlcad_agent_logs` |
 | `CLIENT_V2_PROMPTS_DIR` | Directory of role-prompt overrides, overlaid on the built-ins | -- |
+
+### Using a different model backend
+
+Two ways in, covered fully in [Model backends](docs/PROVIDERS.md).
+
+**Any OpenAI-compatible endpoint** needs configuration only, no extra package.
+This covers local models and gateways — llama.cpp, vLLM, LM Studio, LocalAI,
+Ollama's `/v1` port, a LiteLLM proxy, a company endpoint:
+
+```bash
+LLM_BASE_URL=http://localhost:8080/v1
+LLM_MODEL=whatever-the-server-calls-it
+```
+
+`LLM_PROVIDER=openai` names the wire format rather than the vendor, and the model
+string is passed through unchanged. Setting `LLM_BASE_URL` also switches the
+client from OpenAI's Responses API to chat-completions, since few other endpoints
+implement `/v1/responses`.
+
+**A native integration** needs one install and gets provider-specific features a
+compatibility shim drops:
+
+```bash
+pip install '.[anthropic]'      # or .[google] / .[ollama] / .[bedrock]
+```
+
+```bash
+LLM_PROVIDER=anthropic
+LLM_MODEL=claude-sonnet-4-5
+LLM_API_KEY=sk-ant-...
+```
+
+In either case the model must support tool calling, since every build,
+verification and render goes through a tool, and the image-to-CAD workflow
+additionally requires vision. The worker's tool loop is bounded by call limits so
+a model that does not terminate cannot run indefinitely; see
+[Model backends](docs/PROVIDERS.md) for the values. The deterministic tool path
+(`./evals/run.sh`) requires no model at all.
 
 **Important:** Never commit your `.env` file. It is already included in `.gitignore`.
 

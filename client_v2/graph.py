@@ -47,6 +47,7 @@ from client_v2.agents.verifier import (
 )
 from client_v2.agents.visual import make_visual_check_node, route_after_visual
 from client_v2.agents.worker import make_context_middleware, make_worker_node
+from client_v2.model import for_tool_loop
 from client_v2.pipeline.executor import is_deterministic, make_executor_node
 from client_v2.pipeline.plan import Plan
 from client_v2.runlog import RunLog, null_log
@@ -157,7 +158,10 @@ def build_graph(
         g.add_node(name, _logged(name, node, log))
 
     add("intake", make_intake_node(classifier))
-    add("worker", make_worker_node(worker_model, tools, worker_prompt, middleware))
+    # Tool-call serialization belongs on the tool loop, not the model: the
+    # middleware above and every other node invoke it with no tools.
+    add("worker", make_worker_node(for_tool_loop(worker_model), tools,
+                                   worker_prompt, middleware))
     add("respond", make_respond_node(chat_model))
 
     if registry is not None:

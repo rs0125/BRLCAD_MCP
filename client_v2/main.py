@@ -42,7 +42,7 @@ from langgraph.types import Command
 from brlcad_mcp.config import settings
 from client_v2.agents.conversational import message_text
 from client_v2.graph import build_graph
-from client_v2.model import build_model
+from client_v2.model import build_model, describe_backend
 from client_v2.prompts import PROMPTS
 from client_v2.runlog import open_run_log
 from client_v2.skills import SkillRegistry
@@ -214,6 +214,9 @@ async def run() -> None:
 
         print(f"Loaded {len(tools)} tool(s) from BRL-CAD; "
               f"{len(registry.ids())} skill(s).")
+        # Name the backend: the endpoint is configurable, so a silent fall back
+        # to the default would be the confusing failure.
+        print(f"model: {describe_backend()}")
         if log.path:
             print(f"run log: {log.path}")
         print("=" * 49)
