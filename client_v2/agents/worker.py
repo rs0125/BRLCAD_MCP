@@ -25,13 +25,33 @@ from typing import NotRequired
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentState as _LCAgentState
-from langchain.agents.middleware import SummarizationMiddleware
+from langchain.agents.middleware import (
+    ModelCallLimitMiddleware,
+    SummarizationMiddleware,
+    ToolCallLimitMiddleware,
+)
 
 from client_v2.prompts import resolve
 from client_v2.state import AgentState
 
 SUMMARISE_AT_TOKENS = 60_000
 KEEP_RECENT_MESSAGES = 12
+
+# Loop guards.  The worker's tool loop is otherwise unbounded: create_agent
+# takes no max-iterations argument, and the graph's recursion_limit counts OUTER
+# supersteps -- the whole tool loop is a single superstep, so it never fires.
+# Seen live: a model built the part correctly, verified it against the
+# raytracer, then called declare_assumption 367 times instead of reporting back.
+# A stronger model knowing when to stop is luck, not a guard, and on a metered
+# endpoint the bill is real.
+#
+# Both limits are far above what real work needs.  The successful runs of the
+# same case finish in well under ten model calls.
+MAX_MODEL_CALLS_PER_RUN = 50
+# Declarations have no natural stopping point: each one succeeds and reports a
+# growing total, which reads as encouragement.  An under-specified drawing
+# legitimately produces a handful.
+MAX_DECLARATIONS_PER_RUN = 30
 
 
 class WorkerState(_LCAgentState):
@@ -62,11 +82,20 @@ def make_worker_node(model, tools, system_prompt=None, middleware=None):
     Returns only the messages the agent newly produced, which add_messages
     appends to the shared graph state.
     """
+    # Guards go first so they see every model/tool call, and are built here
+    # rather than passed in so a caller cannot forget them.
+    guards = [
+        ModelCallLimitMiddleware(run_limit=MAX_MODEL_CALLS_PER_RUN,
+                                 exit_behavior="end"),
+        ToolCallLimitMiddleware(tool_name="declare_assumption",
+                                run_limit=MAX_DECLARATIONS_PER_RUN,
+                                exit_behavior="continue"),
+    ]
     agent = create_agent(
         model=model,
         tools=tools,
         system_prompt=resolve(system_prompt, "worker"),
-        middleware=list(middleware or []),
+        middleware=guards + list(middleware or []),
         state_schema=WorkerState,
     )
 

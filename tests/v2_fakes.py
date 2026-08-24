@@ -43,3 +43,30 @@ def ai_tool_call(name: str, args: dict, call_id: str = "call_1") -> AIMessage:
     return AIMessage(
         content="",
         tool_calls=[{"name": name, "args": args, "id": call_id}])
+
+
+class LoopingToolCallingModel(BaseChatModel):
+    """Always requests the same tool call -- a model that never stops.
+
+    Models the failure seen live: gpt-4.1 built and verified the part
+    correctly, then called ``declare_assumption`` 367 times instead of
+    finishing.  ``create_agent`` has no max-iterations option and the graph's
+    ``recursion_limit`` counts outer supersteps, so nothing bounded it.
+    """
+
+    tool_name: str
+    args: dict = Field(default_factory=dict)
+    calls: int = 0
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.calls += 1
+        return ChatResult(generations=[ChatGeneration(
+            message=ai_tool_call(self.tool_name, self.args,
+                                 call_id=f"call_{self.calls}"))])
+
+    @property
+    def _llm_type(self) -> str:
+        return "fake-looping"
+
+    def bind_tools(self, tools, **kwargs):
+        return self
