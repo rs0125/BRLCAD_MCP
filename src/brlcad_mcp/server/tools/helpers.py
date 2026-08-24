@@ -256,6 +256,25 @@ def check_mged_result(response: str, *, command: str) -> str | None:
     if not is_error_response(response):
         return None
     payload = parse_response(response)
+
+    # An unrecognised command name is not a diagnosable failure, and pointing at
+    # analyze_command_error invites a retry loop on the same bad name -- which is
+    # what a weaker model did, repeatedly running a *skill* id as if it were a
+    # command.  Say what is actually wrong and where to look instead.
+    if "unknown command" in payload.lower():
+        name = command.split()[0] if command.split() else command
+        return (
+            f"[MGED_ERROR] Command failed.\n"
+            f"Command: {command}\n"
+            f"Error output: {payload}\n\n"
+            f"Tip: '{name}' is not an MGED command. Do NOT send the same name "
+            f"again. Skill and workflow names are not commands -- they describe "
+            f"work to do with the tools you already have, so use the matching "
+            f"tool instead. If it looks like a typo, call list_commands to see "
+            f"what MGED accepts, or analyze_command_error to identify the "
+            f"intended command."
+        )
+
     return (
         f"[MGED_ERROR] Command failed.\n"
         f"Command: {command}\n"
