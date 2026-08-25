@@ -33,6 +33,8 @@ class AgentState(TypedDict, total=False):
     turn_start: int
     active_skill: str
     plan: Any
+    # Why the last planner pass produced no usable plan, if it did not.
+    plan_errors: list[str]
     step_outputs: dict[str, Any]
     step_errors: list[str]
     verification: Any

@@ -1,6 +1,10 @@
 """client-v2 planner: skill-id parsing, node selection, and the full
 planner -> active_skill -> worker -> SkillsMiddleware injection chain."""
 
+import pytest
+from langchain_core.language_models.fake_chat_models import (
+    FakeMessagesListChatModel,
+)
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import tool
 
@@ -228,3 +232,32 @@ def test_short_messages_are_passed_through_unclipped():
     from client_v2.agents.planner import conversation_context
     state = {"messages": [HumanMessage(content="the depth")]}
     assert conversation_context(state) == "User: the depth"
+
+
+# ------------------------------------------------- the empty-plan fallback
+
+@pytest.mark.asyncio
+async def test_an_unusable_plan_records_why():
+    """The fallback must not be indistinguishable from a successful pass.
+
+    Observed live: the planner returned {"steps":[]} and the run log showed a
+    plan of null with no reason, so diagnosing it meant reading five separate
+    queries.  A parse failure and a deliberate empty plan looked identical.
+    """
+    model = FakeMessagesListChatModel(responses=[AIMessage(content='{"steps":[]}')])
+    node = make_planner_node(model, SkillRegistry.from_dir())
+    out = await node({"messages": [HumanMessage(content="do a thing")]})
+    assert out["plan"] is None
+    assert out.get("plan_errors"), "the reason the plan was unusable must be recorded"
+
+
+@pytest.mark.asyncio
+async def test_a_usable_plan_clears_any_earlier_reason():
+    body = ('{"steps": [{"skill": "build_model_spec", '
+            '"params": {"spec": "<spec>"}, "why": "build it"}]}')
+    model = FakeToolCallingModel(responses=[AIMessage(content=body)])
+    node = make_planner_node(model, SkillRegistry.from_dir())
+    out = await node({"messages": [HumanMessage(content="do a thing")],
+                      "plan_errors": ["stale reason from a previous pass"]})
+    assert out["plan"] is not None
+    assert not out.get("plan_errors")

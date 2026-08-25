@@ -32,6 +32,7 @@ Three findings behind the current shape:
 
 from __future__ import annotations
 
+import json
 import re
 
 from langgraph.types import interrupt
@@ -64,21 +65,78 @@ def broad_destructive(text: str) -> bool:
         and bool(_BROAD_SCOPE.search(text))
 
 
-def authorization_request(plan, registry: SkillRegistry,
-                          request: str = "") -> str | None:
-    """The question that must be answered before this turn acts, or None.
-
-    A planned skill's ``authorize`` step first, then a wholesale-destructive
-    request.  See the module docs for what does and does not justify a halt.
-    """
-    for skill_id in plan_skill_ids(plan):
+def _declared_gate(registry: SkillRegistry, skill_ids) -> str | None:
+    """The first ``authorize`` step declared by any of *skill_ids*."""
+    for skill_id in skill_ids:
         skill = registry.get(skill_id)
         if skill is None:
             continue
         for step in skill.steps:
             if isinstance(step, dict) and step.get("authorize"):
                 return str(step["authorize"])
+    return None
+
+
+def authorization_request(plan, registry: SkillRegistry,
+                          request: str = "",
+                          active_skill: str | None = None) -> str | None:
+    """The question that must be answered before this turn acts, or None.
+
+    A planned skill's ``authorize`` step first, then the fallback's single
+    skill, then a wholesale-destructive request.  See the module docs for what
+    does and does not justify a halt.
+
+    ``active_skill`` matters because the planner has a fallback: when its reply
+    yields no usable plan it returns ``plan=None`` with a single chosen skill
+    instead.  Consulting only the plan meant that path skipped the skill's
+    declared gate entirely -- and an unplanned turn is the one with the least
+    scrutiny elsewhere, so skipping it there is exactly backwards.
+    """
+    gate = _declared_gate(registry, plan_skill_ids(plan))
+    if gate:
+        return gate
+    if active_skill:
+        gate = _declared_gate(registry, [active_skill])
+        if gate:
+            return gate
     return WIPE_QUESTION if broad_destructive(request) else None
+
+
+def describe_pause(value) -> str:
+    """The halt, phrased so it can actually be answered.
+
+    An ``{authorize: "..."}`` entry in a skill is written for the agent, not
+    for the person at the prompt: ``model_from_dimensioned_sketch`` says
+    "confirm the dimensioned plan with the user", which read on its own asks
+    someone to approve a plan they have not been shown.  The interrupt payload
+    already carries the plan, so the numbers being approved are appended to
+    the question rather than left in the state.
+    """
+    if not isinstance(value, dict):
+        return str(value)
+    question = str(value.get("authorize") or "").strip()
+    steps = ((value.get("plan") or {}).get("steps") or [])
+    if not steps:
+        return question
+
+    lines = [question, "", "Plan:"]
+    for i, step in enumerate(steps, 1):
+        if not isinstance(step, dict):
+            lines.append(f"  {i}. {step}")
+            continue
+        skill = step.get("skill") or step.get("phase") or "step"
+        lines.append(f"  {i}. {skill}")
+        if step.get("why"):
+            lines.append(f"       {step['why']}")
+        params = step.get("params")
+        if params:
+            # Compact, and truncated: this is a prompt, not a dump.  The point
+            # is that the dimensions are visible before they are committed to.
+            rendered = json.dumps(params, separators=(", ", ": "))
+            if len(rendered) > 300:
+                rendered = rendered[:300] + " ..."
+            lines.append(f"       {rendered}")
+    return "\n".join(lines)
 
 
 def make_authorize_node(registry: SkillRegistry):
@@ -90,7 +148,8 @@ def make_authorize_node(registry: SkillRegistry):
         if state.get("authorized"):
             return {}
         question = authorization_request(state.get("plan"), registry,
-                                         last_human_text(state))
+                                         last_human_text(state),
+                                         state.get("active_skill"))
         if not question:
             return {"authorized": True}
         answer = interrupt({"authorize": question, "plan": state.get("plan")})

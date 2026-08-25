@@ -40,6 +40,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
 from brlcad_mcp.config import settings
+from client_v2.agents.authorize import describe_pause
 from client_v2.agents.conversational import message_text
 from client_v2.graph import build_graph
 from client_v2.model import build_model, describe_backend
@@ -69,11 +70,16 @@ def _last_ai_text(state) -> str:
 
 
 def _pending_question(result) -> str | None:
-    """The question an authorization halt is waiting on, if the graph paused."""
+    """The question an authorization halt is waiting on, if the graph paused.
+
+    Rendered by describe_pause so the plan travels with the question: the bare
+    skill text ("confirm the dimensioned plan with the user") asks the reader to
+    approve something they cannot see.
+    """
     for pause in (result or {}).get("__interrupt__") or ():
         value = getattr(pause, "value", pause)
         if isinstance(value, dict) and value.get("authorize"):
-            return str(value["authorize"])
+            return describe_pause(value)
     return None
 
 

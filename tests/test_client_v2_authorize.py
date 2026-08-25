@@ -9,6 +9,7 @@ from client_v2.agents.authorize import (
     WIPE_QUESTION,
     authorization_request,
     broad_destructive,
+    describe_pause,
     make_authorize_node,
 )
 from client_v2.graph import build_graph
@@ -236,3 +237,73 @@ async def test_an_image_build_runs_without_stopping():
 
     assert not (result.get("__interrupt__") or ())      # no rubber-stamp pause
     assert result["step_outputs"]["build_model_spec"].startswith("Built region")
+
+
+# --------------------------------------------------------------- describing a pause
+
+def test_a_pause_shows_the_plan_it_is_asking_about():
+    """The bare skill text is an instruction to the agent, not a question.
+
+    Observed live: the halt read "confirm the dimensioned plan with the user",
+    which is the literal {authorize: "..."} string from the skill YAML.  The
+    user was asked to confirm a plan they had never been shown, and could only
+    guess.  The interrupt payload already carries the plan, so describe it.
+    """
+    value = {
+        "authorize": "confirm the dimensioned plan with the user",
+        "plan": {"steps": [
+            {"skill": "build_model_spec",
+             "params": {"spec": {"name": "brick", "expect_bbox": [32, 16, 9.6]}},
+             "why": "build the approved shape"},
+            {"skill": "verify_model_dimensions", "params": {"name": "brick"}},
+        ]},
+    }
+    out = describe_pause(value)
+    assert "confirm the dimensioned plan" in out
+    assert "build_model_spec" in out          # what it will do
+    assert "32" in out and "9.6" in out       # the numbers being approved
+
+
+def test_a_pause_with_no_plan_is_just_the_question():
+    value = {"authorize": "This will DESTROY geometry across the whole database."}
+    assert describe_pause(value) == "This will DESTROY geometry across the whole database."
+
+
+def test_a_pause_with_an_empty_plan_is_just_the_question():
+    # "delete everything" plans as {"steps": []} -- nothing to describe.
+    value = {"authorize": "are you sure?", "plan": {"steps": []}}
+    assert describe_pause(value) == "are you sure?"
+
+
+def test_the_gate_is_not_skipped_when_the_fallback_picked_the_skill():
+    """A null plan must not bypass a skill's authorize step.
+
+    Observed live: the planner returned {"steps":[]}, so plan_skill_ids was
+    empty and the gate found nothing to ask about even though the fallback had
+    selected a skill that declares one.  A fallback path silently skipping a
+    safety gate is the wrong way round: unplanned turns are the ones with least
+    scrutiny elsewhere.
+    """
+    reg = SkillRegistry.from_dir()
+    gated = [i for i in reg.ids()
+             if any(isinstance(s, dict) and s.get("authorize")
+                    for s in (reg.get(i).steps or []))]
+    assert gated, "expected at least one skill to declare an authorize step"
+    skill = gated[0]
+
+    # With a plan naming it, the gate fires (existing behaviour).
+    planned = authorization_request({"steps": [{"skill": skill}]}, reg, "")
+    assert planned
+
+    # With no plan but that skill active, it must still fire.
+    fell_back = authorization_request(None, reg, "", active_skill=skill)
+    assert fell_back == planned
+
+
+def test_an_active_skill_without_a_gate_still_does_not_halt():
+    reg = SkillRegistry.from_dir()
+    ungated = [i for i in reg.ids()
+               if not any(isinstance(s, dict) and s.get("authorize")
+                          for s in (reg.get(i).steps or []))]
+    assert ungated
+    assert authorization_request(None, reg, "", active_skill=ungated[0]) is None

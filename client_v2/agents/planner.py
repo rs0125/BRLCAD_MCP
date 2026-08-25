@@ -143,10 +143,19 @@ def make_planner_node(model, registry: SkillRegistry):
             # step, an arbitrary pick that hid the earlier steps from the worker.
             return {"plan": plan.model_dump(),
                     "active_skill": None,
-                    "revisions": revisions}
+                    "revisions": revisions,
+                    "plan_errors": []}
 
         # Fallback: no usable plan -> single-skill hint (or clear a stale pick).
+        #
+        # Record WHY.  Without this the fallback is indistinguishable from a
+        # successful pass in the run log -- a deliberate {"steps":[]} and a
+        # parse failure both showed up as a plan of null with no reason, and
+        # the worker then ran unplanned with nothing saying so.
+        why = list(errors) if errors else (
+            ["planner returned no steps"] if plan is not None else
+            ["planner reply did not parse as a plan"])
         return {"plan": None, "active_skill": choose_skill(text, registry.ids()),
-                "revisions": revisions}
+                "revisions": revisions, "plan_errors": why}
 
     return planner
