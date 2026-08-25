@@ -236,3 +236,45 @@ def test_render_paths_fall_back_to_an_earlier_message_when_the_last_has_none(tmp
                     tool_call_id="2"),
     ]}
     assert find_render_paths(state) == [str(png)]
+
+
+def test_renders_from_an_earlier_turn_are_not_judged(tmp_path):
+    """A render is only evidence about the database it was made from.
+
+    Observed live: turn 1 built and rendered a sphere, turn 2 deleted it, and
+    turn 3 attached a cake sketch.  The visual check compared the sketch
+    against turn 1's sphere renders and reported "the render has 0 tiers and 0
+    studs" -- true of the picture, false of the database, which was empty.  The
+    resulting MISMATCH then drove a real replan.  The verifier already bounds
+    its scan by turn_start; this node did not.
+    """
+    old = tmp_path / "old_iso.png"
+    old.write_bytes(b"\x89PNG stale")
+
+    state = {
+        # message 0 belongs to a previous turn
+        "messages": [ToolMessage(content=f"Check renders in:\n  iso: {old}",
+                                 tool_call_id="t0", name="build_from_spec")],
+        "turn_start": 1,          # this turn starts after that message
+    }
+    assert find_render_paths(state) == []
+
+
+def test_renders_from_the_current_turn_are_judged(tmp_path):
+    new = tmp_path / "new_iso.png"
+    new.write_bytes(b"\x89PNG fresh")
+    state = {
+        "messages": [ToolMessage(content=f"iso: {new}", tool_call_id="t1",
+                                 name="build_from_spec")],
+        "turn_start": 0,
+    }
+    assert find_render_paths(state) == [str(new)]
+
+
+def test_a_missing_turn_start_still_works(tmp_path):
+    # Defensive: state built by a test or an older checkpoint may not have it.
+    p = tmp_path / "iso.png"
+    p.write_bytes(b"\x89PNG")
+    state = {"messages": [ToolMessage(content=f"iso: {p}", tool_call_id="t",
+                                      name="build_from_spec")]}
+    assert find_render_paths(state) == [str(p)]

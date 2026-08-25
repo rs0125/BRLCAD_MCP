@@ -57,7 +57,7 @@ _PNG = re.compile(r"/[^\s'\"]+\.png")
 
 
 def find_render_paths(state) -> list[str]:
-    """PNG paths from the LATEST render in this turn that exist on disk.
+    """PNG paths from the LATEST render in THIS turn that exist on disk.
 
     Newest-first, and only one render's worth.  Taking first-seen paths instead
     graded stale geometry: a build followed by a corrective ``edit_build`` leaves
@@ -65,9 +65,19 @@ def find_render_paths(state) -> list[str]:
     feature the edit removed -- reported as a mismatch against a model that was
     already correct.  One message is the right unit because a single build emits
     its whole view set in one tool result.
+
+    Bounded by ``turn_start`` (set by intake), as the verifier already is.
+    Without that bound the scan reached into previous turns, and a render is
+    only evidence about the database it was made from: one session built and
+    rendered a sphere, deleted it, then attached a different reference -- and
+    this node compared the new reference against the old sphere renders and
+    reported a mismatch, describing geometry that no longer existed.  Being
+    wrong here is not cosmetic, since the mismatch feeds the planner's next
+    pass as failure context.
     """
+    start = state.get("turn_start") or 0
     texts: list[str] = [str(v) for v in (state.get("step_outputs") or {}).values()]
-    texts += [message_text(m) for m in (state.get("messages") or [])
+    texts += [message_text(m) for m in (state.get("messages") or [])[start:]
               if isinstance(m, ToolMessage)]
     for text in reversed(texts):
         found = [p for p in dict.fromkeys(_PNG.findall(text)) if os.path.isfile(p)]
