@@ -72,7 +72,8 @@ def test_connection_refused_raises(monkeypatch):
     from brlcad_mcp.transport import socket_bridge
 
     fake = SimpleNamespace(
-        brlcad=SimpleNamespace(host="127.0.0.1", port=1, timeout=1.0, buffer_size=4096)
+        brlcad=SimpleNamespace(host="127.0.0.1", port=1, timeout=1.0,
+                               buffer_size=4096, ipc_path="")
     )
     monkeypatch.setattr(socket_bridge, "settings", fake)
     monkeypatch.setattr(socket_bridge, "_connection", socket_bridge._MgedConnection())

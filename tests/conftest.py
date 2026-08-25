@@ -185,7 +185,8 @@ def listener(monkeypatch):
 
     fake_settings = SimpleNamespace(
         brlcad=SimpleNamespace(
-            host="127.0.0.1", port=srv.port, timeout=5.0, buffer_size=4096
+            host="127.0.0.1", port=srv.port, timeout=5.0, buffer_size=4096,
+            ipc_path="",   # these fakes exercise the TCP transport
         )
     )
     monkeypatch.setattr(socket_bridge, "settings", fake_settings)

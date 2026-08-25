@@ -86,8 +86,18 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 @dataclass(frozen=True)
 class BRLCADConfig:
-    """Settings for the BRL-CAD TCP socket bridge."""
+    """Where the libmcpcad listener is, and how patiently to talk to it.
 
+    Two transports carry the same protocol.  Setting ``ipc_path`` selects a
+    Unix-domain socket (``mcp_listen ipc`` in MGED); leaving it unset uses the
+    loopback port (``mcp_listen <port>``).  Presence selects the transport
+    rather than a separate mode setting, so there is one rule to remember.
+    """
+
+    # Path to a Unix-domain socket.  Empty means use host/port instead.
+    ipc_path: str = field(
+        default_factory=lambda: _env_first(("BRLCAD_IPC_PATH",))
+    )
     host: str = field(default_factory=lambda: _env_str("BRLCAD_HOST", "127.0.0.1"))
     port: int = field(default_factory=lambda: _env_num("BRLCAD_PORT", "5555", int))
     timeout: float = field(

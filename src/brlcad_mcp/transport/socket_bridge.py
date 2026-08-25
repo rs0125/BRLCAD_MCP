@@ -49,6 +49,16 @@ def _clean_response(raw: str) -> str:
     return cleaned.strip()
 
 
+def _listener_address() -> str:
+    """Where the client is configured to connect, for diagnostics.
+
+    Rendered in one place so an IPC setup cannot be reported as a TCP address,
+    which would send someone checking the wrong thing entirely.
+    """
+    cfg = settings.brlcad
+    return cfg.ipc_path or f"{cfg.host}:{cfg.port}"
+
+
 class _MgedConnection:
     """Thread-safe persistent connection to the libmcpcad listener."""
 
@@ -59,8 +69,20 @@ class _MgedConnection:
     # -- connection management -----------------------------------------------
 
     def _connect(self) -> socket.socket:
-        """Open (or reopen) the TCP connection."""
+        """Open (or reopen) the connection to the listener.
+
+        The transport is chosen by whether an IPC path is configured; the rest
+        of this module is identical either way, since the frame protocol does
+        not care what carries it.
+        """
         cfg = settings.brlcad
+        if cfg.ipc_path:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(cfg.timeout)
+            sock.connect(cfg.ipc_path)
+            logger.info("Connected to libmcpcad listener at %s", cfg.ipc_path)
+            return sock
+
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(cfg.timeout)
         sock.connect((cfg.host, cfg.port))
@@ -93,7 +115,9 @@ class _MgedConnection:
                 chunk = sock.recv(min(n - len(buf), cfg.buffer_size))
             except TimeoutError as exc:
                 raise TimeoutError(
-                    f"libmcpcad listener at {cfg.host}:{cfg.port} timed out"
+                    f"libmcpcad listener at {_listener_address()} timed out "
+                    f"after {cfg.timeout}s (raise BRLCAD_TIMEOUT for commands "
+                    f"that take longer, such as nirt or gqa on a large model)"
                 ) from exc
             if not chunk:
                 self._disconnect()
@@ -123,7 +147,6 @@ class _MgedConnection:
         connection is reused across calls; one automatic reconnect is
         attempted if it drops.
         """
-        cfg = settings.brlcad
         payload = cmd.encode("utf-8")
         if len(payload) > _MAX_PAYLOAD:
             return f"ERROR: command exceeds {_MAX_PAYLOAD}-byte listener limit"
@@ -158,7 +181,7 @@ class _MgedConnection:
                         raise
                     raise ConnectionError(
                         f"Could not reach libmcpcad listener at "
-                        f"{cfg.host}:{cfg.port}: {exc}"
+                        f"{_listener_address()}: {exc}"
                     ) from exc
 
         # Unreachable, but keeps type checkers happy.
