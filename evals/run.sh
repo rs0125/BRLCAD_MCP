@@ -18,14 +18,34 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 BRLCAD_BUILD="${BRLCAD_BUILD:-$HOME/dev/brlcad/build}"
-SERVER="$BRLCAD_BUILD/src/libmcpcad/tests/mcpcad_test_server"
+# Accept either layout: a build tree keeps the harness beside its source, an
+# installed or released tree keeps it in bin/.  Only the build tree was checked
+# before, so pointing this at a release bundle failed with "no test server".
+SERVER=""
+for candidate in "$BRLCAD_BUILD/src/libmcpcad/tests/mcpcad_test_server" \
+                 "$BRLCAD_BUILD/bin/mcpcad_test_server"; do
+    [ -x "$candidate" ] && { SERVER="$candidate"; break; }
+done
 PORT="${BRLCAD_PORT:-5555}"
 DB="${BRLCAD_EVAL_DB:-$(mktemp -u /tmp/brlcad_eval_XXXXXX.g)}"
 PY=".venv/bin/python"
 
-[ -x "$SERVER" ] || { echo "no test server at $SERVER
-build it, or set BRLCAD_BUILD to your BRL-CAD build tree." >&2; exit 1; }
+[ -n "$SERVER" ] || { echo "no mcpcad_test_server under $BRLCAD_BUILD
+looked in src/libmcpcad/tests/ and bin/.  Build it, or set BRLCAD_BUILD to a
+BRL-CAD build tree or an unpacked release." >&2; exit 1; }
 [ -x "$PY" ] || { echo "no venv at $PY -- create it first." >&2; exit 1; }
+
+# The harness scores with rays, so nirt has to start.  In a build tree it needs
+# LD_LIBRARY_PATH (set below); an installed tree resolves its own libraries.
+# Warn rather than fail: every other check still runs, and a warning names the
+# cause instead of leaving every ray reported as unmeasurable.
+if ! LD_LIBRARY_PATH="$BRLCAD_BUILD/lib" "$(dirname "$SERVER")/../bin/nirt" -h \
+        >/dev/null 2>&1 \
+   && ! LD_LIBRARY_PATH="$BRLCAD_BUILD/lib" "$BRLCAD_BUILD/bin/nirt" -h \
+        >/dev/null 2>&1; then
+    echo "warning: nirt does not start under $BRLCAD_BUILD -- ray checks will
+report as unmeasurable.  Everything else still runs." >&2
+fi
 
 # The key normally lives in .env (loaded by the client at import), NOT in the
 # shell -- checking only the environment rejected a perfectly good run.  Look in
