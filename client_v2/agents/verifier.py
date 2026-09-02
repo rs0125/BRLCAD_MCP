@@ -32,6 +32,7 @@ check render timing out.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 
@@ -49,8 +50,31 @@ _VERDICT = re.compile(r"verification of ['\"]?([\w.]+)['\"]?\s*:\s*(pass|fail)",
 # "Error:" only counts at the start of one (see module docs).
 _ERROR_TAGS = ("[mged_error]",)
 _ERROR_PREFIXES = ("error:",)
-# Failure-message prefixes, so a later PASS can identify what it supersedes.
+# Failure-message prefix, so a later PASS can identify what it supersedes.
 _TOOL_ERROR = "tool reported an error: "
+
+# Two different things were both "a tool error", and only one should end a turn.
+# The line between them already exists above: an explicit [MGED_ERROR] TAG means
+# MGED rejected one command, while a bare "Error:" PREFIX is how the executor
+# reports an unavailable tool and how the transport reports an unreachable
+# listener.
+#
+# A prefix error always fails the turn: the plan was wrong, or nothing ran and
+# nothing can. Saying otherwise would report success for a turn that did nothing.
+#
+# TEMPORARY (while ray checks are off): a tagged MGED rejection does not. The
+# agent is built to recover from those -- that is what analyze_command_error is
+# for -- and a verify PASS used to clear them. With ray verification disabled
+# there is often no PASS to be had, because a raw `in`/`r` build has no stored
+# spec and so verify_model_dimensions is never called. One rejected command the
+# agent had already worked around was therefore reported to the user as
+# "verification failed", and burned both planner revisions retrying work that
+# had in fact succeeded.
+#
+# Set VERIFIER_STRICT=1 to count them again, and flip the default back when ray
+# checks return -- a PASS will supersede them properly then.
+COMMAND_ERRORS_FAIL_TURN = os.getenv("VERIFIER_STRICT", "").strip().lower() in (
+    "1", "true", "yes", "on")
 
 
 def _fail_msg(region: str) -> str:
@@ -95,7 +119,9 @@ def signals(texts: list[str]) -> list[tuple[str, str]]:
         out += [(outcome.lower(), region)
                 for region, outcome in _VERDICT.findall(text)]
         if _is_tool_failure(text):
-            out.append(("error", _first_line(text)[:160]))
+            tagged = any(tag in text.lower() for tag in _ERROR_TAGS)
+            out.append(("mged_error" if tagged else "error",
+                        _first_line(text)[:160]))
     return out
 
 
@@ -120,6 +146,9 @@ def evaluate(texts: list[str]) -> Verdict:
             verdict.failures.append(_fail_msg(detail))
         elif kind == "error":
             verdict.failures.append(f"{_TOOL_ERROR}{detail}")
+        elif kind == "mged_error":
+            if COMMAND_ERRORS_FAIL_TURN:
+                verdict.failures.append(f"{_TOOL_ERROR}{detail}")
         else:                       # a pass proves the region is right NOW
             verdict.failures = _surviving(verdict.failures, detail)
     verdict.passed = not verdict.failures

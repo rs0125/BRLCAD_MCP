@@ -4,6 +4,7 @@ verify -> replan loop through the graph."""
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 
+import client_v2.agents.verifier as VERIFIER
 from client_v2.agents.verifier import (
     MAX_REVISIONS,
     evaluate,
@@ -28,9 +29,32 @@ def test_fail_verdict_is_caught():
     assert "plate.r" in v.failures[0]
 
 
-def test_tool_error_marker_fails_the_turn():
+def test_a_tagged_mged_rejection_is_seen_but_does_not_fail_the_turn():
+    """One command MGED rejected is not a verdict on the model.
+
+    Temporary while ray checks are off: with verification disabled there is
+    often no PASS to supersede a rejection the agent already worked around, so
+    it was surfacing to the user as "verification failed". Still RECOGNISED
+    (checked stays True) -- just not counted.
+    """
+    v = evaluate(["[MGED_ERROR] Command failed.\nCommand: in x\n"])
+    assert v.checked
+    assert v.passed
+    assert v.failures == []
+
+
+def test_strict_mode_counts_a_tagged_rejection_again(monkeypatch):
+    monkeypatch.setattr(VERIFIER, "COMMAND_ERRORS_FAIL_TURN", True)
     v = evaluate(["[MGED_ERROR] Command failed.\nCommand: in x\n"])
     assert v.checked and not v.passed
+
+
+def test_a_prefix_error_still_fails_even_though_a_tag_does_not():
+    """The two must not be conflated: this is how an unavailable tool and an
+    unreachable listener report, and both mean nothing ran."""
+    assert not evaluate(["Error: build_from_spec: tool 'x' unavailable"]).passed
+    assert not evaluate(
+        ["Error: Could not reach libmcpcad listener at /tmp/a.sock"]).passed
 
 
 def test_unverifiable_turn_passes_through_without_looping():
@@ -176,7 +200,10 @@ def test_a_result_that_starts_with_error_is_a_failure():
     assert verdict.checked and not verdict.passed
 
 
-def test_the_explicit_mged_error_tag_fails_anywhere_in_the_output():
+def test_the_explicit_mged_error_tag_is_found_anywhere_in_the_output(monkeypatch):
+    # The tag is detected mid-result, not only at the start -- shown under
+    # strict mode, since by default a tagged rejection does not fail the turn.
+    monkeypatch.setattr(VERIFIER, "COMMAND_ERRORS_FAIL_TURN", True)
     verdict = evaluate(["Command: in x\n[MGED_ERROR] Command failed."])
     assert verdict.checked and not verdict.passed
 
