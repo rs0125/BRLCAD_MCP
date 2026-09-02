@@ -16,9 +16,11 @@ from brlcad_mcp.server.app import mcp
 from brlcad_mcp.server.tools.helpers import (
     BLOCKED_COMMANDS,
     MAX_RETRY_ATTEMPTS,
+    UNSAFE_NIRT_ADVICE,
     check_mged_result,
     is_error_response,
     parse_response,
+    unsafe_nirt,
 )
 from brlcad_mcp.server.tools.snapshots import (
     destructive_effect_note,
@@ -76,6 +78,9 @@ def execute_command(
     first_token = command.strip().split()[0] if command.strip() else ""
     if first_token.lower() in BLOCKED_COMMANDS:
         return f"Error: the command '{first_token}' is blocked for safety."
+    crashing_object = unsafe_nirt(command)
+    if crashing_object:
+        return UNSAFE_NIRT_ADVICE.format(token=crashing_object)
 
     logger.info("execute_command → %s", command)
 
@@ -233,6 +238,13 @@ def analyze_command_error(
         diagnostics.append(
             f"\n[BLOCKED] '{corrected_first}' is not allowed."
         )
+        return "\n".join(diagnostics)
+    # The retry path has to be gated too: a diagnosis that "fixes" a command by
+    # adding the object name would otherwise crash MGED on the retry.
+    crashing_object = unsafe_nirt(corrected_command)
+    if crashing_object:
+        diagnostics.append("\n[BLOCKED] "
+                           + UNSAFE_NIRT_ADVICE.format(token=crashing_object))
         return "\n".join(diagnostics)
 
     # --- Step 4: execute the corrected command ---

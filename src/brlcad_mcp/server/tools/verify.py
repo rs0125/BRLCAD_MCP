@@ -32,6 +32,7 @@ injected ``prober`` so a whole verdict is testable without a live listener.
 from __future__ import annotations
 
 import math
+import os
 import re
 
 from pydantic import Field, ValidationError
@@ -208,6 +209,54 @@ def ray_missed(nirt_output: str) -> bool:
     return "missed the target" in nirt_output.lower()
 
 
+# --- ray checks: OFF for this release ------------------------------------
+#
+# The rays are fired by ``nirt``, which MGED runs as a SEPARATE executable, and
+# in a plain build-tree launch that executable does not start at all:
+#
+#     nirt: error while loading shared libraries: libz_brl.so.1
+#
+# It needs libz_brl transitively via libpng_brl16, whose RUNPATH is empty, and
+# DT_RUNPATH is not inherited by a dependency's own dependencies -- so mged
+# starts fine and every ray it tries to fire dies at exec. An installed tree
+# resolves it correctly and passes all of these checks, so this is about the
+# launch environment, not the geometry.
+#
+# Left on, the failure was worse than useless: every ray reported nothing, that
+# read as "the model is empty", and the agent went looking for a fault that was
+# not there -- a search that reached ``nirt <object>``, which crashes MGED
+# outright and takes the listener with it.
+#
+# NOTHING BELOW IS REMOVED. The sampling, the thickness prediction, the parsers
+# and their tests are all intact; only the call site is gated. Turn them back on
+# with BRLCAD_RAY_CHECKS=1 once nirt starts in the target environment -- verify
+# it does with: nirt -h
+RAY_CHECKS = os.getenv("BRLCAD_RAY_CHECKS", "").strip().lower() in (
+    "1", "true", "yes", "on")
+
+
+def nirt_ran(nirt_output: str) -> bool:
+    """True if *nirt_output* is really nirt's report on a fired ray.
+
+    Recognised by the three things only nirt prints: the firing state
+    (``Origin (x y z) = ...``), the hit table header (``Region Name ... LOS``),
+    or the miss phrase. Any one of them is enough, since which appear depends
+    on the script the ray was fired with. None of them means nirt never
+    reported: a timed-out command, an MGED error, a truncated or empty reply.
+
+    This has to be checked before the numbers are read. :func:`total_los` sums
+    the fields it recognises and returns 0.0 for anything it does not, and
+    :func:`ray_missed` looks for one specific phrase and returns False for
+    everything else. So an unrunnable ray otherwise reads as a confident "hit
+    that crossed 0 mm of material", which is indistinguishable from real
+    geometry being absent and blames the model for a transport failure.
+    """
+    lowered = nirt_output.lower()
+    return ("origin (x y z)" in lowered
+            or "region name" in lowered
+            or ray_missed(nirt_output))
+
+
 def total_los(nirt_output: str) -> float:
     """Total material thickness a ray crossed, summed over ALL partitions.
 
@@ -323,11 +372,16 @@ def _thickness_checks(spec: BuildSpec, prober, region: str):
     prober(f"draw {region}")
 
     mismatches: list[str] = []
+    unmeasured: list[str] = []
     total = 0
     for label, start, direction in sample_rays(spec):
         total += 1
         want = expected_thickness(spec, start, direction)
         out = parse_response(prober(ray_cmd(start, direction)))
+        if not nirt_ran(out):
+            # Not a disagreement about geometry -- no measurement happened.
+            unmeasured.append(f"{label}: {first_line(out)}")
+            continue
         got = 0.0 if ray_missed(out) else total_los(out)
         if abs(want - got) > max(_LOS_TOL_ABS, want * _LOS_TOL_FRAC):
             mismatches.append(
@@ -335,7 +389,24 @@ def _thickness_checks(spec: BuildSpec, prober, region: str):
                 f"{got:.3g} mm")
     # Tidy up after ourselves before returning a verdict on the database.
     cleanup_ray_artifacts(prober)
-    return total, mismatches
+    return total, mismatches, unmeasured
+
+
+def first_line(text: str, limit: int = 70) -> str:
+    """The first non-blank line of *text*, for quoting a reply back concisely."""
+    for line in text.splitlines():
+        if line.strip():
+            return line.strip()[:limit]
+    return "<empty reply>"
+
+
+def _describe_unmeasured(unmeasured: list[str], total: int) -> str:
+    shown = "; ".join(unmeasured[:3])
+    more = f" (+{len(unmeasured) - 3} more)" if len(unmeasured) > 3 else ""
+    return (f"could not measure {len(unmeasured)} of {total} sample rays -- "
+            f"nirt did not report on them: {shown}{more}. The geometry is "
+            f"UNVERIFIED, not wrong: check that the listener is still up and "
+            f"that BRLCAD_TIMEOUT is long enough for nirt, then verify again.")
 
 
 def _describe(mismatches: list[str], total: int) -> str:
@@ -347,8 +418,14 @@ def _describe(mismatches: list[str], total: int) -> str:
             f"cavity is too large. Check the offending parts' centre and size.")
 
 
-def _verify(spec: BuildSpec, prober):
-    """Run the checks via *prober* (cmd -> response). Returns (passed, checks)."""
+def _verify(spec: BuildSpec, prober, rays: bool | None = None):
+    """Run the checks via *prober* (cmd -> response). Returns (passed, checks).
+
+    *rays* overrides :data:`RAY_CHECKS` for one call, which is how the eval
+    harness keeps its ray sweep while the agent-side tool ships without it. It
+    is an argument rather than a global assignment so that one caller's choice
+    cannot leak into another's.
+    """
     region = f"{spec.name}.r"
     checks: list[tuple[str, bool, str]] = []
 
@@ -368,10 +445,22 @@ def _verify(spec: BuildSpec, prober):
     checks.append(("bbox", bbox_matches(expected, actual),
                    f"expected {expected} mm, got {actual} mm"))
 
-    total, mismatches = _thickness_checks(spec, prober, region)
-    checks.append(("geometry", not mismatches,
-                   f"all {total} sample rays match the spec" if not mismatches
-                   else _describe(mismatches, total)))
+    if not (RAY_CHECKS if rays is None else rays):
+        # Skipped entirely rather than reported as a third state: every consumer
+        # of this list treats an entry as pass/fail, and a check that ran no
+        # rays is neither. _format says so instead, so nothing reads as verified
+        # that was not.
+        return all(ok for _, ok, _ in checks), checks
+
+    total, mismatches, unmeasured = _thickness_checks(spec, prober, region)
+    if unmeasured:
+        # Reported ahead of any mismatch: if some rays never ran, the ones that
+        # did are not a basis for a verdict on the geometry either.
+        checks.append(("geometry", False, _describe_unmeasured(unmeasured, total)))
+    else:
+        checks.append(("geometry", not mismatches,
+                       f"all {total} sample rays match the spec" if not mismatches
+                       else _describe(mismatches, total)))
 
     return all(ok for _, ok, _ in checks), checks
 
@@ -380,8 +469,25 @@ def _format(region: str, passed: bool, checks) -> str:
     lines = [f"Verification of '{region}': {'PASS' if passed else 'FAIL'}"]
     for name, ok, detail in checks:
         lines.append(f"  [{'ok' if ok else 'x'}] {name}: {detail}")
+    ran_rays = any(name == "geometry" for name, _, _ in checks)
+    built = any(name == "exists" and ok for name, ok, _ in checks)
+    if not ran_rays and built:
+        # Said plainly so a PASS is not mistaken for a full engine-truth check,
+        # and so this does not get reported to a user as ray-verified.
+        lines.append("  [--] geometry: NOT CHECKED. Ray verification is "
+                     "disabled in this release, so only existence and the "
+                     "bounding box were measured. Interior features (holes, "
+                     "pockets, wall thickness) are unverified -- do not "
+                     "describe them as confirmed.")
     if not passed:
-        lines.append("At least one engine-truth check failed; the build does "
+        # "does not match" would be a false accusation when the reason is that a
+        # check could not run, so say which of the two happened.
+        unverified = any("UNVERIFIED" in detail for _, ok, detail in checks
+                         if not ok)
+        lines.append("A check could not be completed, so the build is "
+                     "unverified; this is not evidence that it is wrong."
+                     if unverified else
+                     "At least one engine-truth check failed; the build does "
                      "not match the spec.")
     return "\n".join(lines)
 
@@ -425,12 +531,19 @@ def verify_model_dimensions(
         description=(
             "A full JSON spec, for a model this server did NOT build (or a "
             "hypothetical one). Prefer 'name' when the build is stored. Verifies "
-            "the built region with BRL-CAD's own raytracer, NOT a render: it "
-            "checks the region exists, its bounding box is right, and that "
-            "along dozens of sample rays the model contains exactly the "
-            "material the spec implies -- which catches missing subtractions, "
-            "mis-placed or wrong-sized cavities, and pockets of the wrong "
-            "depth, for any shape. Returns PASS/FAIL with per-check detail."
+            "the built region against engine truth, NOT a render. Returns "
+            "PASS/FAIL with per-check detail."
+            + (" Checks the region exists, its bounding box is right, and that "
+               "along dozens of sample rays the model contains exactly the "
+               "material the spec implies -- which catches missing "
+               "subtractions, mis-placed or wrong-sized cavities, and pockets "
+               "of the wrong depth, for any shape."
+               if RAY_CHECKS else
+               " In this release it checks EXISTENCE and the BOUNDING BOX only: "
+               "ray checking is disabled, so interior features (holes, "
+               "pockets, wall thickness) are NOT verified. A PASS here means "
+               "the overall size is right; do not report interior features as "
+               "confirmed by it.")
         ),
     ),
     name: str = Field(
@@ -444,6 +557,10 @@ def verify_model_dimensions(
     ),
 ) -> str:
     """Verify a built model matches its spec using engine truth (bb + nirt).
+
+    Ray checking is disabled in this release (see ``RAY_CHECKS`` above), so what
+    actually runs is existence plus the bounding box. The ray machinery is still
+    here and still tested; only the call site is gated.
 
     Two ways in, and they are NOT equivalent. ``name`` reads the stored spec --
     the one ``build_from_spec``/``edit_build`` actually used -- so the check is

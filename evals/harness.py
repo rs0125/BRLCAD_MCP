@@ -551,6 +551,14 @@ def score_rays(rays: list[RayCheck], region: str, prober) -> list:
             want_los = ray.los_frac * lengths[axis]
         cmd = V.ray_cmd(tuple(start), tuple(ray.dir))
         out = parse_response(prober(cmd))
+        if not V.nirt_ran(out):
+            # Without this the check SILENTLY PASSES: ray_missed() is False for
+            # a reply that is not nirt output at all, so a timed-out or errored
+            # ray scored as a hit and any case expecting a hit was credited for
+            # a measurement that never happened.
+            checks.append((f"ray:{ray.desc}", False,
+                           f"nirt did not run: {V.first_line(out)}"))
+            continue
         missed = V.ray_missed(out)
         ok = missed if ray.expect == "miss" else not missed
         detail = f"expected {ray.expect}, got {'miss' if missed else 'hit'}"
@@ -678,7 +686,14 @@ def score_case(case: Case, prober, rounds: int = 0,
     if case.has_spec:
         # Full ground truth: the spec drives the whole engine-truth sweep --
         # existence, derived bbox, and a ray per feature.
-        checks = V._verify(BuildSpec.model_validate(case.spec), prober)[1]
+        # The harness MEASURES, so it keeps its rays even though the agent-side
+        # tool ships with them off: dropping the sweep here would quietly change
+        # what the reported score means. This is a deliberate environment
+        # requirement -- run the harness where nirt starts (an installed tree,
+        # or a build tree with LD_LIBRARY_PATH=<build>/lib). If nirt cannot run,
+        # the rays now report that rather than passing silently.
+        checks = V._verify(BuildSpec.model_validate(case.spec), prober,
+                           rays=True)[1]
     else:
         # Region name + hand-read expectations, no spec.  Existence has to be
         # asserted here rather than left implicit: without it a region the agent

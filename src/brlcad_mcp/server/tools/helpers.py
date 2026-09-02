@@ -11,6 +11,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import logging
+import shlex
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,58 @@ BLOCKED_COMMANDS: set[str] = {
 
 # Maximum number of retry attempts for analyze_command_error.
 MAX_RETRY_ATTEMPTS = 5
+
+# ``nirt`` with a positional object argument does not fail -- it takes MGED
+# down.  ged_nirt_core frees its argument table once the nirt subprocess is
+# launched and then inserts into that freed table if option parsing left a
+# positional behind, so bu_ptbl_ins fails its magic check and bu_bomb ends the
+# process (src/libged/nirt/nirt.cpp; still present on upstream main as of
+# 2026-09-02).  Whatever is driving the session over mcp_listen loses the
+# listener with it, so this has to be refused before it is sent, not diagnosed
+# after.
+#
+# The scripted form the verifier uses is safe: bu_opt consumes each -e value,
+# leaving nothing positional.  Only that form is allowed through, because a
+# refusal costs the caller one turn while a crash costs it the whole session.
+NIRT_SCRIPT_FLAG = "-e"
+
+
+def unsafe_nirt(command: str) -> str | None:
+    """The offending token if *command* is a crash-prone ``nirt`` invocation.
+
+    Returns ``None`` for anything that is not ``nirt``, and for the scripted
+    ``nirt -e "..."`` form. Deliberately conservative: a bare token is refused
+    even when a flag precedes it, since flags that take no value would
+    otherwise let an object through.
+    """
+    try:
+        tokens = shlex.split(command.strip())
+    except ValueError:
+        return None          # unbalanced quotes; let MGED reject it normally
+    if not tokens or tokens[0].lower() != "nirt":
+        return None
+    previous = ""
+    for token in tokens[1:]:
+        if token.startswith("-"):
+            previous = token
+            continue
+        if previous == NIRT_SCRIPT_FLAG:
+            previous = ""
+            continue
+        return token
+    return None
+
+
+# What to tell a caller that tried it, naming the alternative rather than just
+# refusing: the tool that fires rays safely already exists.
+UNSAFE_NIRT_ADVICE = (
+    "Error: 'nirt {token}' would crash MGED and kill the listener, ending the "
+    "session. This is an upstream libged bug (nirt frees and then reuses its "
+    "argument table when given an object name), not a problem with the model. "
+    "To check geometry with rays, call verify_model_dimensions instead. To "
+    "probe by hand, 'draw' the object first and then run nirt with NO object "
+    "argument, which uses whatever is displayed."
+)
 
 # ---------------------------------------------------------------------------
 # Destructive-command detection (for auto-snapshot / restore)

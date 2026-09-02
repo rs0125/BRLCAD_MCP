@@ -9,9 +9,23 @@ no live listener.
 import math
 import re
 
+import pytest
+
 from brlcad_mcp.server.tools import verify as V
 from brlcad_mcp.server.tools.csg import expected_thickness
 from brlcad_mcp.server.tools.reconstruct import BuildSpec, Part
+
+
+@pytest.fixture(autouse=True)
+def _rays_on(monkeypatch):
+    """Exercise the ray path even though the release ships with it disabled.
+
+    ``V.RAY_CHECKS`` is off because nirt does not start in a plain build tree
+    (see verify.py). The machinery it gates is unchanged, and these tests are
+    what keeps that true, so they run with it forced on. The disabled behaviour
+    has its own tests in test_nirt_crash_guard.py.
+    """
+    monkeypatch.setattr(V, "RAY_CHECKS", True)
 
 
 def _plate_spec(hole_radius=5.0, with_hole=True):
