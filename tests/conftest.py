@@ -12,12 +12,21 @@ reuse it but only run when ``--run-llm`` is passed and an API key is present.
 
 from __future__ import annotations
 
+import os
 import socket
 import struct
 import threading
 from types import SimpleNamespace
 
 import pytest
+
+# Isolate the suite from any .env on the machine.  config.py reads the nearest
+# one at import, which is right for running the tool and wrong for testing it:
+# whether the tests pass would otherwise depend on whether this checkout happens
+# to be configured, and on what for.  A tree with BRLCAD_IPC_PATH set really did
+# start failing test_no_ipc_path_means_tcp.  Set here because conftest is
+# imported before the test modules, and settings are built once at import.
+os.environ["BRLCAD_NO_DOTENV"] = "1"
 
 _MAGIC = b"MC"
 
