@@ -7,13 +7,48 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 # Resolve project root (two levels up from this file → src/brlcad_mcp/config.py)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-# Load .env from project root (if it exists)
-load_dotenv(PROJECT_ROOT / ".env")
+
+def _load_env_files() -> list[Path]:
+    """Load .env, nearest-first, and report which files were actually read.
+
+    Two lookups, because one is not enough:
+
+    * The .env nearest the WORKING DIRECTORY wins. ``PROJECT_ROOT`` follows
+      where this file lives, not where you are, so a second checkout -- or an
+      unpacked release run with a ``brlcad-mcp`` from elsewhere on PATH -- was
+      silently reading the *other* tree's .env. That is very hard to see: the
+      symptom is a transport you did not configure, because an unset
+      ``BRLCAD_IPC_PATH`` falls back to host/port and 127.0.0.1:5555 is also
+      the built-in default.
+    * Then the one beside the package. Right for an editable checkout, and the
+      only candidate a non-editable install has -- though there ``PROJECT_ROOT``
+      lands inside site-packages and holds no .env, so such an install is
+      configured by real environment variables alone.
+
+    ``load_dotenv`` never overwrites a variable that is already set, so loading
+    the nearest file first is what makes it take precedence, and a real exported
+    variable still beats both.
+    """
+    loaded: list[Path] = []
+    nearest = find_dotenv(usecwd=True)
+    if nearest:
+        load_dotenv(nearest)
+        loaded.append(Path(nearest).resolve())
+    beside = (PROJECT_ROOT / ".env").resolve()
+    if beside.is_file() and beside not in loaded:
+        load_dotenv(beside)
+        loaded.append(beside)
+    return loaded
+
+
+# Recorded rather than discarded: the banner names these, so "which config am I
+# actually running" is one line of output instead of an investigation.
+ENV_FILES = _load_env_files()
 
 
 def _env_str(name: str, default: str) -> str:

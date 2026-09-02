@@ -39,7 +39,8 @@ from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
-from brlcad_mcp.config import settings
+from brlcad_mcp.config import ENV_FILES, settings
+from brlcad_mcp.transport.socket_bridge import _listener_address
 from client_v2.agents.authorize import describe_pause
 from client_v2.agents.conversational import message_text
 from client_v2.graph import build_graph
@@ -136,6 +137,11 @@ async def _run_turn(graph, inputs, config, debug: bool, log=None) -> None:
     await run_turn(graph, inputs, config, log)
 
 
+def settings_env_files() -> list:
+    """The .env files that were actually read, for the banner."""
+    return ENV_FILES
+
+
 def _mcp_client() -> MultiServerMCPClient:
     """The stdio MCP server subprocess -- importing its tools registers them."""
     return MultiServerMCPClient({
@@ -223,6 +229,14 @@ async def run() -> None:
         # Name the backend: the endpoint is configurable, so a silent fall back
         # to the default would be the confusing failure.
         print(f"model: {describe_backend()}")
+        # And name the listener and the config it came from. Both are the same
+        # class of problem: an unset BRLCAD_IPC_PATH falls back to host/port,
+        # and 127.0.0.1:5555 is also the built-in default -- so "not
+        # configured" and "configured to the default" look identical. Printing
+        # the .env actually read turns "which config is live" into one line.
+        print(f"brlcad: {_listener_address()}")
+        print("config: " + (", ".join(str(f) for f in settings_env_files())
+                            or "no .env found -- environment variables only"))
         if log.path:
             print(f"run log: {log.path}")
         print("=" * 49)
