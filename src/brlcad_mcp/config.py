@@ -34,15 +34,6 @@ def _load_env_files() -> list[Path]:
     the nearest file first is what makes it take precedence, and a real exported
     variable still beats both.
     """
-    # An explicit opt-out, so a run can be made to depend on nothing but real
-    # environment variables. The test suite uses it: otherwise whether a
-    # developer happens to have a .env -- and what is in it -- decides whether
-    # the tests pass, which is how a configured checkout started failing
-    # "no ipc path means tcp".
-    if os.getenv("BRLCAD_NO_DOTENV", "").strip().lower() in (
-            "1", "true", "yes", "on"):
-        return []
-
     loaded: list[Path] = []
     nearest = find_dotenv(usecwd=True)
     if nearest:
